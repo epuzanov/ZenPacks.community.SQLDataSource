@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2009, 2010 Egor Puzanov.
+# Copyright (C) 2009, 2010, 2011 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.4 2010/12/26 17:56:42 egor Exp $"""
+$Id: SQLClient.py,v 1.5 2011/01/15 12:35:41 egor Exp $"""
 
-__version__ = "$Revision: 1.4 $"[11:-2]
+__version__ = "$Revision: 1.5 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -76,9 +76,6 @@ def sortQuery(qs, table, query):
     return qs
 
 
-class BadCredentials(Exception): pass
-
-
 class SQLClient(BaseClient):
 
     def __init__(self, device=None, datacollector=None, plugins=[]):
@@ -87,6 +84,7 @@ class SQLClient(BaseClient):
         self.datacollector = datacollector
         self.plugins = plugins
         self.results = []
+        self._dbpool = None
 
 
     def parseError(self, err, query, resMaps):
@@ -115,68 +113,63 @@ class SQLClient(BaseClient):
         except: return value
 
 
+    def makePool(self, cs=None):
+        try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
+        except:
+            args = []
+            kwargs = {}
+            for arg in cs.split(','):
+                try:
+                    if arg.strip().startswith("'"):
+                        arg = arg.strip("' ")
+                        raise
+                    var, val = arg.strip().split('=', 1)
+                    if val.startswith('\'') or val.startswith('"'):
+                        kwargs[var.strip()] = val.strip('\'" ')
+                    else:
+                        kwargs[var.strip()] = int(val.strip())
+                except: args.append(arg)
+        return adbapi.ConnectionPool(*args, **kwargs)
+
+
+    def close(self):
+        if hasattr(self._dbpool, 'close'):
+            self._dbpool.close()
+        self._dbpool = None
+
+
     def parseResults(self, rows, resMaps):
         results = {}
         try:
-            header = [h[0] for h in rows[0]]
-            rows = rows[1]
+            header = [h[0].upper() for h in rows[0]]
+            columns = zip(*rows[1])
         except: return results
-        try: rdict = dict(rows)
-        except: rdict = None
-        for maps in resMaps.values():
-            for tables in maps.values():
+        for kbKey, kbVal in resMaps.iteritems():
+            kbDict = {}
+            colnames = set([k.upper() for k in kbVal.values()[0][0][1].keys()])
+            if colnames.issubset(set([str(c).upper() for c in columns[0]])):
+                kbDict[()]=[dict(zip([str(c).upper() for c in columns[0]],
+                                    columns[1]))]
+            elif colnames.issubset(set(header)):
+                try:cols = zip(zip(*[columns[i] for i in [
+                            header.index(k.upper()) for k in kbKey]]),rows[1])
+                except: cols = ()
+                for kIdx, row in cols:
+                    if kIdx not in kbDict: kbDict[kIdx] = []
+                    kbDict[kIdx].append(dict(zip(header, row)))
+            for tk, tables in kbVal.iteritems():
+                rDicts = kbDict.get(tuple([str(t).strip('"\' ') for t in tk]),
+                                    [{},])
                 for table, cols in tables:
-                    results[table] = []
-                    if not rdict: continue
-                    try:
+                    if table not in results: results[table] = []
+                    for rDict in rDicts:
                         result = {}
                         for name, anames in cols.iteritems():
+                            res = self.parseValue(rDict.get(name.upper(), None))
                             if type(anames) is not tuple: anames = (anames,)
-                            for aname in anames:result[aname] = self.parseValue(
-                                                                    rdict[name])
+                            for aname in anames: result[aname] = res
                         if result: results[table].append(result)
-                    except: rdict = None
-        if rdict: return results
-        for row in rows:
-            for kbKey, kbVal in resMaps.iteritems():
-                if kbKey == (): kbIns = ()
-                else: kbIns = tuple([str(t).strip('"\' ') for t in row[(0 - len(kbKey)):]])
-                for tkey, tables in kbVal.iteritems():
-                    if tuple([str(t).strip('"\' ') for t in tkey]) != kbIns:
-                        continue
-                    for table, cols in tables:
-                        result = {}
-                        current_row = list(row[:])
-                        clist = cols.keys()
-                        clist.sort()
-                        for name in clist:
-                            anames = cols[name]
-                            try: valindex = header.index(name)
-                            except: valindex = clist.index(name)
-                            res = self.parseValue(current_row[valindex])
-                            if type(anames) is not tuple: anames = (anames,)
-                            for aname in anames:result[aname] = res
-                        if result: results[table].append(result)
-#                    del kbVal[tkey]
-                    break
         return results
-
-
-    def parseCS(self, cs):
-        args = []
-        kw = {}
-        for arg in cs.split(','):
-            try:
-                if arg.strip().startswith("'"):
-                    arg = arg.strip("' ")
-                    raise
-                var, val = arg.strip().split('=', 1)
-                if val.startswith('\'') or val.startswith('"'):
-                    kw[var.strip()] = val.strip('\'" ')
-                else:
-                    kw[var.strip()] = int(val.strip())
-            except: args.append(arg)
-        return args, kw
 
 
     def query(self, queries):
@@ -201,8 +194,7 @@ class SQLClient(BaseClient):
             try:
                 queryResult = {}
                 for cs, qs in queries.iteritems():
-                    args, kw = self.parseCS(cs)
-                    dbpool = adbapi.ConnectionPool(*args, **kw)
+                    self._dbpool = self.makePool(cs)
                     for query, resMaps in qs.iteritems():
                         if () not in resMaps:
                             if len(resMaps.values()[0].values()) > 1:
@@ -217,16 +209,17 @@ class SQLClient(BaseClient):
                                             resMaps.values()[0].keys()[0])]))
                         log.debug("SQL Query: %s", query)
                         try:
-                            yield dbpool.runInteraction(_getQueries, query)
+                            yield self._dbpool.runInteraction(_getQueries,query)
                             queryResult.update(self.parseResults(driver.next(),
                                                                     resMaps))
                         except StandardError, ex:
                             queryResult.update(self.parseError(ex, query,
                                                                     resMaps))
-                    dbpool.close()
+                    self.close()
                 yield defer.succeed(queryResult)
                 driver.next()
             except Exception, ex:
+                self.close()
                 log.debug("Exception collecting query: %s", str(ex))
                 raise
         return drive(inner)
@@ -261,6 +254,7 @@ class SQLClient(BaseClient):
         """
         return self.results
 
+
 def SQLGet(cs, query, columns):
     from SQLPlugin import SQLPlugin
     sp = SQLPlugin()
@@ -269,14 +263,13 @@ def SQLGet(cs, query, columns):
     cl.run()
     reactor.run()
     for plugin, result in cl.getResults():
-        if plugin == sp and 't' in result:
-            return result['t']
+        if plugin == sp: return result.get('t', result)
     return result
 
 
 if __name__ == "__main__":
-    cs = "MySQLdb,host='127.0.0.1',port=3307,db='information_schema',user='zenoss',passwd='zenoss'"
-    query = "USE information_schema; SHOW GLOBAL STATUS;"
+    cs = "'MySQLdb',host='127.0.0.1',port=3307,db='information_schema',user='zenoss',passwd='zenoss'"
+    query = "SHOW GLOBAL STATUS"
     columns = ["Bytes_received", "Bytes_sent"]
     aliases = ["Bytes_received", "Bytes_sent"]
     import getopt
