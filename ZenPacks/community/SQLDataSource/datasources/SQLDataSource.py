@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2010 Egor Puzanov.
+# Copyright (C) 2010, 2011 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.4 2010/12/17 16:46:56 egor Exp $"""
+$Id: SQLDataSource.py,v 1.5 2011/02/17 22:35:02 egor Exp $"""
 
-__version__ = "$Revision: 1.4 $"[11:-2]
+__version__ = "$Revision: 1.5 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -26,6 +26,7 @@ from AccessControl import ClassSecurityInfo, Permissions
 import cgi
 import time
 import os
+import re
 
 class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
@@ -35,8 +36,6 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
     sourcetype = 'SQL'
     cs = ''
     sql = ''
-    sqlparsed = ''
-    sqlkb = {}
 
     _properties = RRDDataSource._properties + (
         {'id':'cs', 'type':'string', 'mode':'w'},
@@ -84,44 +83,40 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         if REQUEST:
             self.cs = REQUEST.get('cs', '')
             self.sql = REQUEST.get('sql', '')
-            self.sqlparsed, self.sqlkb = self.parseSqlQuery(self.sql)
         return RRDDataSource.zmanage_editProperties(self, REQUEST)
 
 
+    def rePrepare(self, tokens):
+        return '[ \\n]%s[ \\n]'%'[ \\n]|[ \\n]'.join(tokens)
+
+
     def parseSqlQuery(self, sql):
-        keybindings = {}
-        if sql == '': return '', {}
+        skip_tokens = ('LIMIT', 'OR', 'NOT', 'HAVING', 'PROCEDURE','INTO')
+        where_end_tokens = ('GROUP BY', 'ORDER BY', 'GO', ';')
+        sql_u = sql.upper()
+        where_s = sql_u.rfind('WHERE ') + 6
+        if where_s < 6: return sql, {}
+        if re.search(self.rePrepare(skip_tokens),sql_u[where_s:]):return sql,{}
+        where_e = re.search(self.rePrepare(where_end_tokens),sql_u[where_s:])
+        if where_e: where_e = where_e.start() + where_s
+        else: where_e = len(sql)
         try:
-            newsql, where = sql.rsplit('WHERE ', 1)
-            wheres = ['',]
-            for token in where.strip('\n ;').split():
-                if token.upper() in ('LIMIT', 'OR', 'NOT'): raise
-                if token.upper() in ('GO', ';'): continue
-                if token.upper() == 'AND': wheres.append('')
-                wheres[-1] = wheres[-1] + ' ' + token
-            newwhere = []
-            for kb in wheres:
-                var, val = kb.split('=')
-                if newsql.find('%s'%var.strip()) == -1: newwhere.append(kb)
-                else: keybindings[var.strip()] = val.strip()
-            if keybindings:
-                sql = newsql
-                if newwhere: sql = sql + ' WHERE %s AND '%' AND '.join(newwhere)
+            where = re.compile(' AND ', re.I).sub(',', sql[where_s:where_e])
+            kbs = eval('(lambda **kwargs: kwargs)(%s)'%where)
+            sql = sql[:where_s - 6] + sql[where_e:]
         except: return sql, {}
-        return sql, keybindings
+        return sql, kbs
 
 
     def getConnectionString(self, context):
         return self.getCommand(context, self.cs)
 
 
-    def getQueryInfo(self, cntx):
+    def getQueryInfo(self, context):
         try:
-            if self.sqlparsed == '':
-                self.sqlparsed, self.sqlkb = self.parseSqlQuery(self.sql)
-            sql = self.getCommand(cntx, self.sqlparsed)
-            kb=dict([(k,self.getCommand(cntx,v)) for k,v in self.sqlkb.items()])
-            return sql, kb, self.getConnectionString(cntx)
+            sql = self.getCommand(context, self.sql)
+            sqlp, kbs = self.parseSqlQuery(sql)
+            return sql, sqlp, kbs, self.getConnectionString(context)
         except: return None
 
 

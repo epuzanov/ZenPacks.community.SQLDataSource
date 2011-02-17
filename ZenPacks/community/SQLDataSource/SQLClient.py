@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.5 2011/01/15 12:35:41 egor Exp $"""
+$Id: SQLClient.py,v 1.6 2011/02/17 22:29:39 egor Exp $"""
 
-__version__ = "$Revision: 1.5 $"[11:-2]
+__version__ = "$Revision: 1.6 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -53,37 +53,16 @@ def _filename(device):
     return zenPath('var', _myname(), device)
 
 
-def sortQuery(qs, table, query):
-    sql, kbs, cs, cols = query
-    if not kbs: kbs = {}
-    ikey = tuple(kbs.keys())
-    ival = tuple(kbs.values())
-    try:
-        if ival not in qs[cs][sql][ikey]:
-            qs[cs][sql][ikey][ival] = []
-        qs[cs][sql][ikey][ival].append((table, cols))
-    except KeyError:
-        try:
-            qs[cs][sql][ikey] = {}
-        except KeyError:
-            try:
-                qs[cs][sql] = {}
-            except KeyError:
-                qs[cs] = {}
-                qs[cs][sql] = {}
-            qs[cs][sql][ikey] = {}
-        qs[cs][sql][ikey][ival] = [(table, cols)]
-    return qs
-
-
 class SQLClient(BaseClient):
 
-    def __init__(self, device=None, datacollector=None, plugins=[]):
+    def __init__(self, device=None, datacollector=None, plugins=[], cs=None):
         BaseClient.__init__(self, device, datacollector)
         self.device = device
+        self.cs = cs
         self.datacollector = datacollector
-        self.plugins = plugins
-        self.results = []
+        self.plugins = {}
+        self.results = {}
+        self.plugins = dict([(plugin.name(), plugin) for plugin in plugins])
         self._dbpool = None
 
 
@@ -114,6 +93,7 @@ class SQLClient(BaseClient):
 
 
     def makePool(self, cs=None):
+        if not cs: return None
         try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
         except:
             args = []
@@ -151,94 +131,85 @@ class SQLClient(BaseClient):
                 kbDict[()]=[dict(zip([str(c).upper() for c in columns[0]],
                                     columns[1]))]
             elif colnames.issubset(set(header)):
-                try:cols = zip(zip(*[columns[i] for i in [
-                            header.index(k.upper()) for k in kbKey]]),rows[1])
-                except: cols = ()
-                for kIdx, row in cols:
+                for row in rows[1]:
+                    rDict = dict(zip(header, row))
+                    kIdx = tuple([rDict[k.upper()] for k in kbKey])
                     if kIdx not in kbDict: kbDict[kIdx] = []
-                    kbDict[kIdx].append(dict(zip(header, row)))
+                    kbDict[kIdx].append(rDict)
             for tk, tables in kbVal.iteritems():
                 rDicts = kbDict.get(tuple([str(t).strip('"\' ') for t in tk]),
-                                    [{},])
+                                    [{}])
                 for table, cols in tables:
                     if table not in results: results[table] = []
                     for rDict in rDicts:
                         result = {}
                         for name, anames in cols.iteritems():
                             res = self.parseValue(rDict.get(name.upper(), None))
-                            if type(anames) is not tuple: anames = (anames,)
+                            if not hasattr(anames, '__iter__'): anames=(anames,)
                             for aname in anames: result[aname] = res
                         if result: results[table].append(result)
         return results
 
 
-    def query(self, queries):
-        resMaps = {}
-        for table, query in queries.iteritems():
-            resMaps = sortQuery(resMaps, table, query)
-        return self.sortedQuery(resMaps)
+    def sortQueries(self, tables): 
+        queries = {}
+        for tn, (sql, kbs, cs, columns) in tables.iteritems():
+            ikey, ival = zip(*(kbs or {}).iteritems()) or ((),())
+            if cs not in queries:
+                queries[cs] = {sql:{ikey:{ival:[(tn, columns)]}}}
+            elif sql not in queries[cs]:
+                queries[cs][sql] = {ikey:{ival:[(tn, columns)]}}
+            elif ikey not in queries[cs][sql]:
+                queries[cs][sql][ikey] = {ival:[(tn, columns)]}
+            elif ival not in queries[cs][sql][ikey]:
+                queries[cs][sql][ikey][ival] = [(tn, columns)]
+            else:
+                queries[cs][sql][ikey][ival].append((tn, columns))
+        return queries
 
 
-    def sortedQuery(self, queries):
-        def _getQueries(txn, query):
-            gostat = re.compile('\bgo\b', re.IGNORECASE)
-            try: query = gostat.sub('; ', query)
-            except: pass
-            query = query.replace('\n', ' ')
-            for q in query.split(';'):
+    def query(self, queries, cs=None):
+        def _execute(txn, sql):
+            for q in re.split('[ \n]go[ \n]|;[ \n]', sql,re.IGNORECASE):
                 if not q.strip(): continue
                 txn.execute(q.strip())
             return txn.description, txn.fetchall()
 
         def inner(driver):
             try:
-                queryResult = {}
-                for cs, qs in queries.iteritems():
-                    self._dbpool = self.makePool(cs)
-                    for query, resMaps in qs.iteritems():
-                        if () not in resMaps:
-                            if len(resMaps.values()[0].values()) > 1:
-                                if query.endswith(' AND '):
-                                    query = query[:-5]
-                            else:
-                                if not query.endswith(' AND '):
-                                    query = query + ' WHERE '
-                                query = query + ' AND '.join((
-                                        ['='.join(k) for k in zip(
-                                            resMaps.keys()[0],
-                                            resMaps.values()[0].keys()[0])]))
-                        log.debug("SQL Query: %s", query)
-                        try:
-                            yield self._dbpool.runInteraction(_getQueries,query)
-                            queryResult.update(self.parseResults(driver.next(),
-                                                                    resMaps))
-                        except StandardError, ex:
-                            queryResult.update(self.parseError(ex, query,
-                                                                    resMaps))
-                    self.close()
-                yield defer.succeed(queryResult)
+                results = {}
+                self._dbpool = self.makePool(cs)
+                for query, resMaps in queries.iteritems():
+                    log.debug("SQL Query: %s", query)
+                    try:
+                        yield self._dbpool.runInteraction(_execute, query)
+                        results.update(self.parseResults(driver.next(),resMaps))
+                    except StandardError, ex:
+                        queryResult.update(self.parseError(ex, query, resMaps))
+                self.close()
+                log.debug("results: %s", results)
+                yield defer.succeed(results)
                 driver.next()
             except Exception, ex:
-                self.close()
                 log.debug("Exception collecting query: %s", str(ex))
                 raise
+        if not cs: cs = self.cs
         return drive(inner)
 
 
     def run(self):
-        def inner(driver):
+        queries = {}
+        for pluginName, plugin in self.plugins.iteritems():
             try:
-                for plugin in self.plugins:
-                    pluginName = plugin.name()
-                    log.debug("Sending queries for plugin: %s", pluginName)
-                    log.debug("Queries: %s" % str(plugin.queries(self.device)))
-                    try:
-                        yield self.query(plugin.queries(self.device))
-                        self.results.append((plugin, driver.next()))
-                    except Exception, ex:
-                        self.results.append((plugin, ex))
-            except Exception, ex:
-                raise
+                for tn, query in plugin.queries(self.device).iteritems():
+                    queries[(pluginName, tn)] = query
+            except: continue
+        def inner(driver):
+            for cs, q in self.sortQueries(queries).iteritems():
+                yield self.query(q, cs)
+                self.results.update(driver.next())
+            yield defer.succeed(self.results)
+            driver.next()
         d = drive(inner)
         def finish(result):
             if self.datacollector:
@@ -252,7 +223,7 @@ class SQLClient(BaseClient):
     def getResults(self):
         """Return data for this client
         """
-        return self.results
+        return [(self.plugins[p],{t:r}) for (p,t),r in self.results.iteritems()]
 
 
 def SQLGet(cs, query, columns):
@@ -268,8 +239,8 @@ def SQLGet(cs, query, columns):
 
 
 if __name__ == "__main__":
-    cs = "'MySQLdb',host='127.0.0.1',port=3307,db='information_schema',user='zenoss',passwd='zenoss'"
-    query = "SHOW GLOBAL STATUS"
+    cs = "'MySQLdb',host='127.0.0.1',port=3306,db='information_schema',user='zenoss',passwd='zenoss'"
+    query = "USE information_schema; SHOW GLOBAL STATUS;"
     columns = ["Bytes_received", "Bytes_sent"]
     aliases = ["Bytes_received", "Bytes_sent"]
     import getopt

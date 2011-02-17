@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2010 Egor Puzanov.
+# Copyright (C) 2010, 2011 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,12 +12,14 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 1.0 2010/06/14 09:07:34 egor Exp $"""
+$Id: SQLPlugin.py,v 1.1 2011/02/17 22:31:14 egor Exp $"""
 
-__version__ = "$Revision: 1.0 $"[11:-2]
+__version__ = "$Revision: 1.1 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
+from Products.ZenUtils.Driver import drive
 from twisted.python.failure import Failure
+from twisted.internet import defer
 from SQLClient import SQLClient
 
 class SQLPlugin(CollectorPlugin):
@@ -33,7 +35,15 @@ class SQLPlugin(CollectorPlugin):
         return self.tables
 
     def collect(self, device, log):
-        return SQLClient(device).query(self.queries(device))
+        def inner(driver):
+            results = {}
+            for cs, q in queries:
+                yield SQLClient(device, cs=cs).query(q, cs)
+                results.update(driver.next())
+            yield defer.succeed(results)
+            driver.next()
+        queries = SQLClient().sortQueries(self.queries(device)).iteritems()
+        return drive(inner)
 
     def preprocess(self, results, log):
         newres = {}
