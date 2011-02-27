@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.3 2011/02/17 22:33:04 egor Exp $"""
+$Id: zenperfsql.py,v 1.4 2011/02/26 14:32:33 egor Exp $"""
 
-__version__ = "$Revision: 1.3 $"[11:-2]
+__version__ = "$Revision: 1.4 $"[11:-2]
 
 import logging
 
@@ -245,33 +245,44 @@ class ZenPerfSqlTask(ObservableMixin):
         # ZenCollector framework can keep track of the success/failure rate
         return result
 
-    def _failure(self, result, comp=None):
+    def _failure(self, result):
         """
         Errback for an unsuccessful asynchronous connection or collection 
         request.
         """
         self._cleanup()
-        err = result.getErrorMessage()
-        cn = self._preferences.collectorName
-        if comp: comp = [comp]
-        else: comp = [(self._monitor, cn)]
-#        else:comp = set([tn.split('/')[0],cn for tn in self._datapoints.keys()])
-        summary = "Could not fetch data from source"
-        for devId, compName in comp:
-            log.error("Device %s: %s", devId, err)
-
-            self._eventService.sendEvent(dict(
-                summary = summary,
-                message = summary + " (%s)"%err,
-                component = compName,
-                eventClass = '/Status/PyDBAPI',
-                device = devId,
-                severity = Error,
-                agent = cn,
-                ))
+        devices = {}
+        for tn in self._datapoints.keys():
+            devices[tn.split('/')[0]] = {'':result}
+#        devices = {self._monitor:{'':result}}
+        self._sendEvents(devices)
 
         # give the result to the rest of the errback chain
         return result
+
+
+    def _sendEvents(self, devices):
+        """
+        Sent Error and Clear events 
+        """
+        message = "Could not fetch data"
+        agent = self._preferences.collectorName,
+        for devId, components in devices.iteritems():
+            for comp, severity in components.iteritems():
+                if isinstance(severity, Failure):
+                    message = severity.getErrorMessage()
+#                    log.error("Device %s, Component %s: %s", devId,comp,message)
+                    severity = Error
+                self._eventService.sendEvent(dict(
+                    summary = "Could not fetch data",
+                    message = message,
+                    eventClass = '/Status/PyDBAPI',
+                    device = devId,
+                    component = comp,
+                    severity = severity,
+                    agent = agent,
+                    ))
+                break
 
 
     def _collectSuccessful(self, results):
@@ -289,16 +300,17 @@ class ZenPerfSqlTask(ObservableMixin):
             ZenPerfSqlTask.QUERIES += len(q)
 
         if not results: return None
-        collectorName = self._preferences.collectorName
-        compstatus = {(self._monitor, collectorName):Clear}
+#        compstatus = {self._monitor:{'':Clear}}
+        compstatus = {}
         for tn,dpname,comp,expr,rrdPath,rrdType,rrdC,minmax in self._datapoints:
             values = []
             if '/' not in tn: devId = self._monitor
             else: devId = tn.split('/')[0] or self._monitor
-            if (devId,comp) not in compstatus: compstatus[(devId,comp)] = Clear
+            if devId not in compstatus: compstatus[devId] = {}
+            if comp not in compstatus[devId]: compstatus[devId][comp] = Clear
             for d in results.get(tn, []):
                 if isinstance(d, Failure):
-                    compstatus[(devId, comp)] = d
+                    compstatus[devId][comp] = d
                     break
                 if len(d) == 0: continue
                 dpvalue = d.get(dpname, None)
@@ -331,17 +343,7 @@ class ZenPerfSqlTask(ObservableMixin):
                                         rrdC,
                                         min=minmax[0],
                                         max=minmax[1])
-        for (devId, comp), status in compstatus.iteritems():
-            if status == Clear:
-                self._eventService.sendEvent(dict(
-                    summary="Could not fetch data from source",
-                    component=comp,
-                    eventClass='/Status/PyDBAPI',
-                    device=devId,
-                    severity=Clear,
-                    agent=collectorName,
-                    ))
-            else: self._failure(status, [(devId, comp)])
+        self._sendEvents(compstatus)
         return results
 
 

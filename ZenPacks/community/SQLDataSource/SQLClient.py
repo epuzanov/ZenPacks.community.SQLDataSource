@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.6 2011/02/17 22:29:39 egor Exp $"""
+$Id: SQLClient.py,v 1.7 2011/02/27 18:33:25 egor Exp $"""
 
-__version__ = "$Revision: 1.6 $"[11:-2]
+__version__ = "$Revision: 1.7 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -68,7 +68,7 @@ class SQLClient(BaseClient):
 
     def parseError(self, err, query, resMaps):
         err = Failure(err)
-        err.value = 'Received error (%s) from query: %s'%(err.value, query)
+        err.value = "Received error (%s) from query: '%s'"%(err.value, query)
         log.error(err.getErrorMessage())
         results = {}
         for instances in resMaps.values():
@@ -185,7 +185,7 @@ class SQLClient(BaseClient):
                         yield self._dbpool.runInteraction(_execute, query)
                         results.update(self.parseResults(driver.next(),resMaps))
                     except StandardError, ex:
-                        queryResult.update(self.parseError(ex, query, resMaps))
+                        results.update(self.parseError(ex, query, resMaps))
                 self.close()
                 log.debug("results: %s", results)
                 yield defer.succeed(results)
