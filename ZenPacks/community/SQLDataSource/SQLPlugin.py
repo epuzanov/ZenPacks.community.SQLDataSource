@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 1.2 2011/02/27 18:33:57 egor Exp $"""
+$Id: SQLPlugin.py,v 1.3 2011/02/27 21:05:48 egor Exp $"""
 
-__version__ = "$Revision: 1.2 $"[11:-2]
+__version__ = "$Revision: 1.3 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from Products.ZenUtils.Driver import drive
@@ -34,7 +34,7 @@ class SQLPlugin(CollectorPlugin):
     def queries(self, device = None):
         return self.tables
 
-    def collect(self, device, log):
+    def collect(self, device, log, queries=None):
         def inner(driver):
             results = {}
             for cs, q in queries:
@@ -46,7 +46,8 @@ class SQLPlugin(CollectorPlugin):
             yield defer.succeed(results)
             driver.next()
         try:
-            queries = SQLClient().sortQueries(self.queries(device)).iteritems()
+            if not queries:
+                queries=SQLClient().sortQueries(self.queries(device)).iteritems()
             return drive(inner)
         except:
             return Failure('Syntax error in query') 
