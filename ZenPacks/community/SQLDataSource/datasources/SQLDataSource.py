@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.5 2011/02/17 22:35:02 egor Exp $"""
+$Id: SQLDataSource.py,v 1.6 2011/03/15 18:16:42 egor Exp $"""
 
-__version__ = "$Revision: 1.5 $"[11:-2]
+__version__ = "$Revision: 1.6 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -65,6 +65,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
     def getDescription(self):
         return self.sql
+
 
     def useZenCommand(self):
         return False
@@ -117,7 +118,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             sql = self.getCommand(context, self.sql)
             sqlp, kbs = self.parseSqlQuery(sql)
             return sql, sqlp, kbs, self.getConnectionString(context)
-        except: return None
+        except: return '', '', '', ''
 
 
     def testDataSourceAgainstDevice(self, testDevice, REQUEST, write, errorLog):
@@ -169,8 +170,10 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
         try:
             import sys
-            cs = self.getConnectionString(device)
-            sql = self.getCommand(device, self.sql).replace('$','\\$')
+            sql, sqlp, kbs, cs = self.getQueryInfo(device)
+            if not sql:
+                raise StandardError('query is empty')
+            sql = sql.replace('$','\\$')
             properties = dict([(
                         dp.getAliasNames() and dp.getAliasNames()[0] or dp.id,
                         dp.id) for dp in self.getRRDDataPoints()])
