@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.7 2011/02/27 18:33:25 egor Exp $"""
+$Id: SQLClient.py,v 1.8 2011/03/15 22:45:22 egor Exp $"""
 
-__version__ = "$Revision: 1.7 $"[11:-2]
+__version__ = "$Revision: 1.8 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -267,15 +267,11 @@ if __name__ == "__main__":
     if type(results) is not list:
         print results
         sys.exit(1)
-    if len(results) > 1 and not isinstance(results[0], Failure):
-        print "|".join(results[0].keys())
-    for res in results:
-        if isinstance(res, Failure):
-            print res.getErrorMessage()
-        else:
-            if len(results) == 1:
-                for var, val in res.items():
-                    if var in columns.values():
-                        var = columns.keys()[columns.values().index(var)]
-                    print "%s = %s"%(var, val)
-            else: print "|".join([str(r) for r in res.values()])
+    if isinstance(results[0], Failure):
+        print results[0].getErrorMessage()
+        sys.exit(1)
+    if not columns:
+        columns = dict(zip(results[0].keys(), results[0].keys()))
+    print "|".join(columns.values())
+    for row in results:
+        print "|".join([str(row.get(dpname,'')) for dpname in columns.values()])

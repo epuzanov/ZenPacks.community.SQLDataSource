@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.6 2011/03/15 18:16:42 egor Exp $"""
+$Id: SQLDataSource.py,v 1.7 2011/03/15 22:36:13 egor Exp $"""
 
-__version__ = "$Revision: 1.6 $"[11:-2]
+__version__ = "$Revision: 1.7 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -129,6 +129,10 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         @param Function write The output method we are using to stream the result of the command
         @parma Function errorLog The output method we are using to report errors
         """ 
+        def writeLines(lines):
+            for line in lines.splitlines():
+                write(line)
+
         out = REQUEST.RESPONSE
         # Determine which device to execute against
         device = None
@@ -159,7 +163,16 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                 priority=messaging.WARNING
             )
             return self.callZenScreen(REQUEST)
-
+        ttpc = getattr(self.rrdTemplate(), 'targetPythonClass', '')
+        try:
+            ccm, ccn = ttpc.rsplit('.', 1)
+            compClass = getattr(__import__(ttpc,globals(),locals(),[ccn]),ccn)
+            if compClass:
+                for comp in device.getMonitoredComponents():
+                    if isinstance(comp, compClass):
+                        device = comp
+                        break
+        except: pass
         header = ''
         footer = ''
         # Render
@@ -168,6 +181,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
         out.write(str(header))
 
+        start = time.time()
         try:
             import sys
             sql, sqlp, kbs, cs = self.getQueryInfo(device)
@@ -186,8 +200,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                                                 zp.path('SQLClient.py'),cs,sql,
                                                 " ".join(properties.keys()),
                                                 " ".join(properties.values()))
-            start = time.time()
-            executeStreamCommand(command, write)
+            executeStreamCommand(command, writeLines)
         except:
             import sys
             write('exception while executing command')
