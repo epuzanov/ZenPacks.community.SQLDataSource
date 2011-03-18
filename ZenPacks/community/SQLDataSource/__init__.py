@@ -12,6 +12,7 @@ if os.path.isdir(skinsDir):
 from Products.ZenModel.ZenPack import ZenPackBase
 from Products.ZenModel.DataPointGraphPoint import DataPointGraphPoint
 
+
 class ZenPack(ZenPackBase):
     """ SQLDataSource loader
     """

@@ -12,17 +12,16 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.5 2011/03/14 21:52:40 egor Exp $"""
+$Id: zenperfsql.py,v 1.6 2011/03/18 20:51:19 egor Exp $"""
 
-__version__ = "$Revision: 1.5 $"[11:-2]
+__version__ = "$Revision: 1.6 $"[11:-2]
 
 import logging
 
 import Globals
 import zope.component
 import zope.interface
-import datetime
-import time
+from DateTime import DateTime
 import md5
 
 from twisted.internet import defer, reactor
@@ -72,7 +71,7 @@ def rrpn(expression, value):
         tokens = expression.split(',')
         tokens.reverse()
         for token in tokens:
-            if token == 'now': token = time.time()
+            if token == 'now': token = DateTime()._t
             try:
                 stack.append(float(token))
             except ValueError:
@@ -317,8 +316,7 @@ class ZenPerfSqlTask(ObservableMixin):
                 dpvalue = d.get(dpname, None)
                 if dpvalue == None or dpvalue == '': continue
                 elif type(dpvalue) is list: dpvalue = dpvalue[0]
-                elif isinstance(dpvalue, datetime.datetime):
-                    dpvalue = time.mktime(dpvalue.timetuple())
+                elif isinstance(dpvalue, DateTime): dpvalue = dpvalue._t
                 if expr:
                     if expr.__contains__(':'):
                         for vmap in expr.split(','):

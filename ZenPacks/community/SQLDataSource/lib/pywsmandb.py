@@ -111,7 +111,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module may be shared, but not connections
-threadsafety = 1
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'

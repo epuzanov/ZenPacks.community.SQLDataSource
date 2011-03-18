@@ -175,7 +175,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module may be shared, but not connections
-threadsafety = 1
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -365,6 +365,9 @@ class pysambaCnx:
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wctx = POINTER(IWbemContext)()
+        self._chunkSize = 10
+        self._objs = (POINTER(WbemClassObject)*self._chunkSize)()
+        self._count = uint32_t()
 
         try:
             library.lp_load()
@@ -462,37 +465,34 @@ class pysambaCnx:
         """
         Execute WQL query and fetch first row
         """
-        chunkSize = 10
         try:
-            pEnum = POINTER(IEnumWbemClassObject)()
+            self._pEnum = POINTER(IEnumWbemClassObject)()
             props, classname, kbs = WQLPAT.match(query).groups('')
             result = library.IWbemServices_ExecQuery(
                         self._pWS,
                         self._ctx,
                         "WQL",
                         query,
-                        WBEM_FLAG_RETURN_IMMEDIATELY |
+                        WBEM_FLAG_RETURN_IMMEDIATELY | \
                         WBEM_FLAG_ENSURE_LOCATABLE,
                         None,
-                        byref(pEnum))
+                        byref(self._pEnum))
             WERR_CHECK(result, self._host, "ExecQuery")
-            result = library.IEnumWbemClassObject_Reset(pEnum, self._ctx)
+            result = library.IEnumWbemClassObject_Reset(self._pEnum, self._ctx)
             WERR_CHECK(result, self._host, "Reset result of WMI query.");
-            assert pEnum
-            count = uint32_t()
-            objs = (POINTER(WbemClassObject)*chunkSize)()
+            assert self._pEnum
             library.talloc_increase_ref_count(self._ctx)
             result = library.IEnumWbemClassObject_SmartNext(
-                        pEnum,
+                        self._pEnum,
                         self._ctx,
                         -1,
-                        chunkSize,
-                        objs,
-                        byref(count))
+                        self._chunkSize,
+                        self._objs,
+                        byref(self._count))
             WERR_CHECK(result, self._host, "Retrieve result data.")
-            if count.value == 0: return None, []
-            klass = objs[0].contents.obj_class.contents
-            inst = objs[0].contents.instance.contents
+            if self._count.value == 0: return None, []
+            klass = self._objs[0].contents.obj_class.contents
+            inst = self._objs[0].contents.instance.contents
             typedict = {}
             maxlen = {}
             cimkey = {}
@@ -520,10 +520,10 @@ class pysambaCnx:
                             maxlen.get(pname, None), maxlen.get(pname, None),
                             None, None, None) for pname in props])
             rows = []
-            while count.value > 0:
-                for i in range(count.value):
-                    klass = objs[i].contents.obj_class.contents
-                    inst = objs[i].contents.instance.contents
+            while self._count.value > 0:
+                for i in range(self._count.value):
+                    klass = self._objs[i].contents.obj_class.contents
+                    inst = self._objs[i].contents.instance.contents
                     pdict = {'_class_name': getattr(klass, '__CLASS', '')}
                     kbs = []
                     for j in range(getattr(klass, '__PROPERTY_COUNT')):
@@ -536,17 +536,15 @@ class pysambaCnx:
                             kbs.append(cimkey[prop.name]%value)
                     pdict['__path'] = pdict['_class_name'] + '.' + ','.join(kbs)
                     rows.append(tuple([pdict.get(p, None) for p in props]))
-                assert pEnum
-#                count = uint32_t()
-#                objs = (POINTER(WbemClassObject)*chunkSize)()
-#                library.talloc_increase_ref_count(self._ctx)
+                assert self._pEnum
+                library.talloc_increase_ref_count(self._ctx)
                 result = library.IEnumWbemClassObject_SmartNext(
-                        pEnum,
+                        self._pEnum,
                         self._ctx,
                         -1,
-                        chunkSize,
-                        objs,
-                        byref(count))
+                        self._chunkSize,
+                        self._objs,
+                        byref(self._count))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
             talloc_free(self._ctx)
             return descr, rows
@@ -574,7 +572,7 @@ class pysambaCnx:
         """
         Commit transaction which is currently in progress.
         """
-        if self._cnx:
+        if self._ctx:
             return
         else:
             raise InterfaceError, "Connection is closed."
@@ -608,9 +606,10 @@ class win32comCnx:
     def __init__(self, user, password, host, namespace):
         self._host = host
         self._cnx = None
+        self._swl = None
         try:
-            swl = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-            self._cnx = swl.ConnectServer(host,namespace,user,password)
+            self._swl = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+            self._cnx = self._swl.ConnectServer(host,namespace,user,password)
         except Exception, e:
             raise InterfaceError, e
 

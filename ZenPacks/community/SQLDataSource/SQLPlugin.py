@@ -12,15 +12,15 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 1.4 2011/02/28 16:28:12 egor Exp $"""
+$Id: SQLPlugin.py,v 1.5 2011/03/18 20:50:25 egor Exp $"""
 
-__version__ = "$Revision: 1.4 $"[11:-2]
+__version__ = "$Revision: 1.5 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from Products.ZenUtils.Driver import drive
 from twisted.python.failure import Failure
 from twisted.internet import defer
-from SQLClient import SQLClient
+from SQLClient import SQLClient, sortQueries
 
 class SQLPlugin(CollectorPlugin):
     """
@@ -31,24 +31,26 @@ class SQLPlugin(CollectorPlugin):
 
     tables = {}
 
-    def queries(self, device = None):
+    def queries(self, device=None):
         return self.tables
 
-    def collect(self, device, log, queries=None):
+    def prepareQueries(self, device=None):
+        return self.queries(device)
+
+    def collect(self, device, log):
         def inner(driver):
             results = {}
-            for cs, q in queries:
+            for cs, q in queries.iteritems():
                 try:
-                    yield SQLClient(device, cs=cs).query(q, cs)
+                    sqlcl = SQLClient(device, cs=cs)
+                    yield sqlcl.query(q)
                     results.update(driver.next())
                 except:
                     log.error('Error in query %s', q)
             yield defer.succeed(results)
             driver.next()
         try:
-            if not queries:
-                queries = self.queries(device)
-            queries = SQLClient().sortQueries(queries).iteritems()
+            queries = sortQueries(self.prepareQueries(device))
             return drive(inner)
         except:
             return Failure('Syntax error in query') 

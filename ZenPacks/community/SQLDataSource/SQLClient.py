@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.8 2011/03/15 22:45:22 egor Exp $"""
+$Id: SQLClient.py,v 1.9 2011/03/18 20:49:42 egor Exp $"""
 
-__version__ = "$Revision: 1.8 $"[11:-2]
+__version__ = "$Revision: 1.9 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -53,6 +53,23 @@ def _filename(device):
     return zenPath('var', _myname(), device)
 
 
+def sortQueries(tables): 
+    queries = {}
+    for tn, (sql, kbs, cs, columns) in tables.iteritems():
+        ikey, ival = zip(*(kbs or {}).iteritems()) or ((),())
+        if cs not in queries:
+            queries[cs] = {sql:{ikey:{ival:[(tn, columns)]}}}
+        elif sql not in queries[cs]:
+            queries[cs][sql] = {ikey:{ival:[(tn, columns)]}}
+        elif ikey not in queries[cs][sql]:
+            queries[cs][sql][ikey] = {ival:[(tn, columns)]}
+        elif ival not in queries[cs][sql][ikey]:
+            queries[cs][sql][ikey][ival] = [(tn, columns)]
+        else:
+            queries[cs][sql][ikey][ival].append((tn, columns))
+    return queries
+
+
 class SQLClient(BaseClient):
 
     def __init__(self, device=None, datacollector=None, plugins=[], cs=None):
@@ -81,15 +98,12 @@ class SQLClient(BaseClient):
     def parseValue(self, value):
         if isinstance(value, datetime.datetime): return DateTime(value)
         if isinstance(value, decimal.Decimal): return long(value)
-        if value == None: return None
-        try: return int(value)
-        except: pass
-        try: return float(value)
-        except: pass
-        try: return DateTime(value)
-        except: pass
-        try: return value.strip()
-        except: return value
+        if type(value) not in (str, unicode): return value
+        if value.isdigit(): return long(value)
+        if value.replace('.', '', 1).isdigit(): return float(value)
+        if value == 'false': return False
+        if value == 'true': return True
+        return value.strip()
 
 
     def makePool(self, cs=None):
@@ -128,9 +142,9 @@ class SQLClient(BaseClient):
             kbDict = {}
             colnames = set([k.upper() for k in kbVal.values()[0][0][1].keys()])
             if colnames.issubset(set([str(c).upper() for c in columns[0]])):
-                kbDict[()]=[dict(zip([str(c).upper() for c in columns[0]],
-                                    columns[1]))]
-            elif colnames.issubset(set(header)):
+                kbDict[()] = [dict(zip([str(c).upper() for c in columns[0]],
+                                                                columns[1]))]
+            else:
                 for row in rows[1]:
                     rDict = dict(zip(header, row))
                     kIdx = tuple([rDict[k.upper()] for k in kbKey])
@@ -149,23 +163,6 @@ class SQLClient(BaseClient):
                             for aname in anames: result[aname] = res
                         if result: results[table].append(result)
         return results
-
-
-    def sortQueries(self, tables): 
-        queries = {}
-        for tn, (sql, kbs, cs, columns) in tables.iteritems():
-            ikey, ival = zip(*(kbs or {}).iteritems()) or ((),())
-            if cs not in queries:
-                queries[cs] = {sql:{ikey:{ival:[(tn, columns)]}}}
-            elif sql not in queries[cs]:
-                queries[cs][sql] = {ikey:{ival:[(tn, columns)]}}
-            elif ikey not in queries[cs][sql]:
-                queries[cs][sql][ikey] = {ival:[(tn, columns)]}
-            elif ival not in queries[cs][sql][ikey]:
-                queries[cs][sql][ikey][ival] = [(tn, columns)]
-            else:
-                queries[cs][sql][ikey][ival].append((tn, columns))
-        return queries
 
 
     def query(self, queries, cs=None):
@@ -201,11 +198,11 @@ class SQLClient(BaseClient):
         queries = {}
         for pluginName, plugin in self.plugins.iteritems():
             try:
-                for tn, query in plugin.queries(self.device).iteritems():
+                for tn, query in plugin.prepareQueries(self.device).iteritems():
                     queries[(pluginName, tn)] = query
             except: continue
         def inner(driver):
-            for cs, q in self.sortQueries(queries).iteritems():
+            for cs, q in sortQueries(queries).iteritems():
                 yield self.query(q, cs)
                 self.results.update(driver.next())
             yield defer.succeed(self.results)
@@ -221,9 +218,46 @@ class SQLClient(BaseClient):
 
 
     def getResults(self):
-        """Return data for this client
         """
-        return [(self.plugins[p],{t:r}) for (p,t),r in self.results.iteritems()]
+        Return data for this client
+        """
+        presults = dict([(pn, {}) for pn in self.plugins.keys()])
+        for (pname, tname), result in self.results.iteritems():
+            presults[pname][tname] = result
+        return [(self.plugins[pn],r) for pn, r in presults.iteritems()]
+
+
+def sqlCollect(collector, device, ip, timeout):
+    """
+    Start sql collection client.
+
+    @param collector: collector
+    @type collector: string
+    @param device: device to collect against
+    @type device: string
+    @param ip: IP address of device to collect against
+    @type ip: string
+    @param timeout: timeout before failing the connection
+    @type timeout: integer
+    """
+    client = None
+    try:
+        plugins = collector.selectPlugins(device, "sql")
+        if not plugins:
+            collector.log.info("No SQL plugins found for %s" % device.id)
+            return
+        if collector.checkCollection(device):
+            collector.log.info('SQL collection device %s' % device.id)
+            collector.log.info("plugins: %s",
+                    ", ".join(map(lambda p: p.name(), plugins)))
+            client = SQLClient(device, collector, plugins)
+        if not client or not plugins:
+            collector.log.warn("SQL client creation failed")
+            return
+    except (SystemExit, KeyboardInterrupt): raise
+    except:
+        collector.log.exception("Error opening sql client")
+    collector.addClient(client, timeout, 'SQL', device.id)
 
 
 def SQLGet(cs, query, columns):
@@ -235,7 +269,7 @@ def SQLGet(cs, query, columns):
     reactor.run()
     for plugin, result in cl.getResults():
         if plugin == sp: return result.get('t', result)
-    return result
+    return [Failure('ERROR:zen.SQLClient:No data received.')]
 
 
 if __name__ == "__main__":
@@ -264,9 +298,6 @@ if __name__ == "__main__":
             aliases = arg.split()
     columns = dict(zip(columns, aliases))
     results = SQLGet(cs, query, columns)
-    if type(results) is not list:
-        print results
-        sys.exit(1)
     if isinstance(results[0], Failure):
         print results[0].getErrorMessage()
         sys.exit(1)
