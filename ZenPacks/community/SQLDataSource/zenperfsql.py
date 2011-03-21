@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.6 2011/03/18 20:51:19 egor Exp $"""
+$Id: zenperfsql.py,v 1.7 2011/03/21 19:58:17 egor Exp $"""
 
-__version__ = "$Revision: 1.6 $"[11:-2]
+__version__ = "$Revision: 1.7 $"[11:-2]
 
 import logging
 
@@ -136,14 +136,15 @@ class ZenPerfSqlTaskSplitter(object):
                     queries[cs][sqlp][ikey][ival] = [(tn, columns)]
                 else:
                     queries[cs][sqlp][ikey][ival].append((tn, columns))
-        for cs, config in newconfigs.iteritems():
-            configId = md5.new(cs).hexdigest()
-#            configId = cs
+        for cs in queries.keys():
             self._taskFactory.reset()
+            self._taskFactory.config = newconfigs.get(cs)
+            configId = self._taskFactory.config.id
+#            configId = md5.new(cs).hexdigest()
+#            configId = cs
             self._taskFactory.name = configId
             self._taskFactory.configId = configId
             self._taskFactory.interval = config.configCycleInterval
-            self._taskFactory.config = config
             self._taskFactory.config.queries = queries.get(cs, {})
             self._taskFactory.config.datapoints = datapoints.get(cs, [])
             self._taskFactory.config.thresholds = thresholds.get(cs, [])
