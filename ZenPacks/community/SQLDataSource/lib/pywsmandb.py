@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 from xml.dom.minidom import parseString
 from xml.dom.minicompat import NodeList
@@ -396,15 +396,18 @@ class pywsmanCnx(baseCnx):
     """
     This class represent an WS-Management Connection connection.
     """
-    def __init__(self, scheme, port, path, user, password, host, namespace):
-        self._host = host
-        self._namespace = namespace
+    def __init__(self, *args, **kwargs):
+        self._host = kwargs['host']
+        self._namespace = kwargs['namespace']
         self._options = pywsman.ClientOptions()
-        self._cnx = pywsman.Client(host, int(port), path, scheme, user,password)
+        self._cnx = pywsman.Client(kwargs['host'], int(kwargs['port']),
+                                    kwargs['path'], kwargs['scheme'],
+                                    kwargs['user'], kwargs['password'])
         doc = self._cnx.identify( self._options )
         if not doc:
             raise OperationalError,"Access denied for user '%s' to '%s://%s:%s%s'"%(
-                                                user, scheme, host, port, path)
+                            kwargs['user'], kwargs['scheme'], kwargs['host'],
+                            kwargs['port'], kwargs['path'])
         if 'Microsoft' in str(doc):
             self._dialect = pywsman.WSM_WQL_FILTER_DIALECT
         else:
@@ -468,23 +471,24 @@ class win32comCnx(baseCnx):
     """
     This class represent an WS-Management Connection connection.
     """
-    def __init__(self, scheme, port, path, user, password, host, namespace):
-        self._host = host
-        self._namespace = namespace
+    def __init__(self, *args, **kwargs):
+        self._host = kwargs['host']
+        self._namespace = kwargs['namespace']
         self._cnx = None
         try:
             self._wsman = win32com.client.Dispatch("Wsman.Automation")
             flags = self._wsman.SessionFlagUseBasic()|\
                     self._wsman.SessionFlagCredUsernamePassword()
             options = self._wsman.CreateConnectionOptions()
-            options.Username = user
-            options.Password = password
-            url = "%s://%s:%s%s"%(scheme, host, port, path)
+            options.Username = kwargs['user']
+            options.Password = kwargs['password']
+            url = "%s://%s:%s%s"%(kwargs['scheme'], kwargs['host'],
+                                                kwargs['port'], kwargs['path'])
             self._cnx = self._wsman.CreateSession(url, flags, options)
             doc = self._cnx.Identify()
         except Exception, e:
-            raise OperationalError,"Access denied for user '%s' to '%s'"%(user,
-                                                                            url)
+            raise OperationalError,"Access denied for user '%s' to '%s'"%(
+                                                            kwargs['user'], url)
         if 'Microsoft' in str(doc):
             self._dialect = "http://schemas.microsoft.com/wbem/wsman/1/WQL"
         else:
@@ -534,8 +538,7 @@ class win32comCnx(baseCnx):
             raise OperationalError, e
 
 # connects to a WS-Management CIMOM
-def Connect(scheme='http',port=5985,path='/wsman',user='',password='',host='',
-                namespace='http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2'):
+def Connect(*args, **kwargs):
 
     """
     Constructor for creating a connection to the WS-Management. Returns
@@ -560,9 +563,9 @@ def Connect(scheme='http',port=5985,path='/wsman',user='',password='',host='',
     """
 
     if platform.system() == 'Windows':
-        return win32comCnx(scheme, port, path, user, password, host, namespace)
+        return win32comCnx(*args, **kwargs)
     else:
-        return pywsmanCnx(scheme, port, path, user, password, host, namespace)
+        return pywsmanCnx(*args, **kwargs)
 
 connect = Connection = Connect
 

@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import platform
 import datetime
@@ -360,8 +360,8 @@ class pysambaCnx:
     """
     This class represent an WMI Connection connection.
     """
-    def __init__(self, user, password, host, namespace):
-        self._host = host
+    def __init__(self, *args, **kwargs):
+        self._host = kwargs['host']
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wctx = POINTER(IWbemContext)()
@@ -383,7 +383,7 @@ class pysambaCnx:
 
             library.com_init_ctx(byref(self._ctx), None)
 
-            creds = user + '%' + password
+            creds = kwargs['user'] + '%' + kwargs['password']
             cred = library.cli_credentials_init(self._ctx)
             library.cli_credentials_set_conf(cred)
             library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
@@ -395,7 +395,7 @@ class pysambaCnx:
             result = library.WBEM_ConnectServer(
                         self._ctx,          # com_ctx
                         host,               # server
-                        namespace,          # namespace
+                        kwargs['namespace'],# namespace
                         None,               # user
                         None,               # password
                         None,               # locale
@@ -603,13 +603,14 @@ class win32comCnx:
     """
     This class represent an WMI Connection connection.
     """
-    def __init__(self, user, password, host, namespace):
-        self._host = host
+    def __init__(self, *args, **kwargs):
+        self._host = kwargs['host']
         self._cnx = None
         self._swl = None
         try:
             self._swl = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-            self._cnx = self._swl.ConnectServer(host,namespace,user,password)
+            self._cnx = self._swl.ConnectServer(self._host, kwargs['namespace'],
+                                            kwargs['user'], kwargs['password'])
         except Exception, e:
             raise InterfaceError, e
 
@@ -699,7 +700,7 @@ class win32comCnx:
         return
 
 # connects to a WMI CIMOM
-def Connect(user=None, password=None, host=None, namespace=None):
+def Connect(*args, **kwargs):
 
     """
     Constructor for creating a connection to the WMI. Returns
@@ -719,9 +720,9 @@ def Connect(user=None, password=None, host=None, namespace=None):
     """
 
     if platform.system() == 'Windows':
-        return win32comCnx(user, password, host, namespace)
+        return win32comCnx(*args, **kwargs)
     else:
-        return pysambaCnx(user, password, host, namespace)
+        return pysambaCnx(*args, **kwargs)
 
 connect = Connection = Connect
 

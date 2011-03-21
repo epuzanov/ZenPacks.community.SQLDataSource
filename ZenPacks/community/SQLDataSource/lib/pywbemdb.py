@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 try:
     import pywbem
@@ -333,11 +333,12 @@ class pywbemCnx:
     """
     This class represent an WBEM Connection connection.
     """
-    def __init__(self, scheme, port, user, password, host, namespace):
-        self._host = host
-        url = '%s://%s:%s'%(scheme, host, port)
-        self._cnx = pywbem.WBEMConnection(url, (user, password),
-                                          default_namespace=namespace)
+    def __init__(self, *args, **kwargs):
+        self._host = kwargs['host']
+        url = '%s://%s:%s'%(kwargs['scheme'], kwargs['host'], kwargs['port'])
+        self._cnx = pywbem.WBEMConnection(url,
+                                        (kwargs['user'], kwargs['password']),
+                                        default_namespace=kwargs['namespace'])
 
     def _convert(self, value, is_array):
         """
@@ -474,8 +475,7 @@ class pywbemCnx:
         return
 
 # connects to a WBEM CIMOM
-def Connect(scheme='https', port=5989, user='', password='', host='',
-                                                        namespace='root/cimv2'):
+def Connect(*args, **kwargs):
 
     """
     Constructor for creating a connection to the WBEM. Returns
@@ -498,7 +498,7 @@ def Connect(scheme='https', port=5989, user='', password='', host='',
                             )
     """
 
-    return pywbemCnx(scheme, port, user, password, host, namespace)
+    return pywbemCnx(*args, **kwargs)
 
 connect = Connection = Connect
 
