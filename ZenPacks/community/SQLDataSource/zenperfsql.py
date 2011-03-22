@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.7 2011/03/21 19:58:17 egor Exp $"""
+$Id: zenperfsql.py,v 1.8 2011/03/23 00:54:45 egor Exp $"""
 
-__version__ = "$Revision: 1.7 $"[11:-2]
+__version__ = "$Revision: 1.8 $"[11:-2]
 
 import logging
 
@@ -139,9 +139,7 @@ class ZenPerfSqlTaskSplitter(object):
         for cs in queries.keys():
             self._taskFactory.reset()
             self._taskFactory.config = newconfigs.get(cs)
-            configId = self._taskFactory.config.id
-#            configId = md5.new(cs).hexdigest()
-#            configId = cs
+            configId = self._taskFactory.config.id +'_'+ md5.new(cs).hexdigest()
             self._taskFactory.name = configId
             self._taskFactory.configId = configId
             self._taskFactory.interval = config.configCycleInterval

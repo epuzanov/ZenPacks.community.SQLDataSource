@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 import platform
 import datetime
@@ -394,7 +394,7 @@ class pysambaCnx:
             flags.value = 0
             result = library.WBEM_ConnectServer(
                         self._ctx,          # com_ctx
-                        host,               # server
+                        self._host,         # server
                         kwargs['namespace'],# namespace
                         None,               # user
                         None,               # password

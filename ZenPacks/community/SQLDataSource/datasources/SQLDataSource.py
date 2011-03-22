@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.8 2011/03/18 20:52:26 egor Exp $"""
+$Id: SQLDataSource.py,v 1.9 2011/03/22 22:36:44 egor Exp $"""
 
-__version__ = "$Revision: 1.8 $"[11:-2]
+__version__ = "$Revision: 1.9 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -104,7 +104,13 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         try:
             where = re.compile(' AND ', re.I).sub(',', sql[where_s:where_e])
             kbs = eval('(lambda **kwargs: kwargs)(%s)'%where)
+            dp = self.getRRDDataPoints()[-1]
+            colName = dp.getAliasNames() and dp.getAliasNames()[0] or dp.id
+            cPos = sql_u[:where_s].find(colName.upper())
+            if cPos < 0: return sql, {}
+            cPos = cPos + len(colName)
             sql = sql[:where_s - 6] + sql[where_e:]
+            sql = sql[:cPos] + ',' + ','.join(kbs.keys()) + sql[cPos:]
         except: return sql, {}
         return sql, kbs
 

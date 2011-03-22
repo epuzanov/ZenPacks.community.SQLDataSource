@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 try:
     import pywbem
@@ -402,7 +402,7 @@ class pywbemCnx:
                 results = self._cnx.EnumerateInstances(classname,**kwargs)
         except pywbem.CIMError, e:
             raise InterfaceError, e
-        except AuthError:
+        except pywbem.cim_http.AuthError:
             raise InterfaceError, "Bad credentials."
         try:
             typedict = {}
