@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.2'
+__version__ = '1.0.3'
 
 import platform
 import datetime
@@ -96,6 +96,19 @@ else:
     WBEM_S_TIMEDOUT = 0x40004L
 
     WERR_BADFUNC = 1
+
+    if True:
+        library.lp_load()
+        library.dcerpc_init()
+        library.dcerpc_table_init()
+        library.dcom_proxy_IUnknown_init()
+        library.dcom_proxy_IWbemLevel1Login_init()
+        library.dcom_proxy_IWbemServices_init()
+        library.dcom_proxy_IEnumWbemClassObject_init()
+        library.dcom_proxy_IRemUnknown_init()
+        library.dcom_proxy_IWbemFetchSmartEnum_init()
+        library.dcom_proxy_IWbemWCOSmartEnum_init()
+
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -370,17 +383,6 @@ class pysambaCnx:
         self._count = uint32_t()
 
         try:
-            library.lp_load()
-            library.dcerpc_init()
-            library.dcerpc_table_init()
-            library.dcom_proxy_IUnknown_init()
-            library.dcom_proxy_IWbemLevel1Login_init()
-            library.dcom_proxy_IWbemServices_init()
-            library.dcom_proxy_IEnumWbemClassObject_init()
-            library.dcom_proxy_IRemUnknown_init()
-            library.dcom_proxy_IWbemFetchSmartEnum_init()
-            library.dcom_proxy_IWbemWCOSmartEnum_init()
-
             library.com_init_ctx(byref(self._ctx), None)
 
             creds = kwargs['user'] + '%' + kwargs['password']
