@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.10 2011/03/23 19:42:01 egor Exp $"""
+$Id: SQLDataSource.py,v 1.11 2011/03/24 16:51:39 egor Exp $"""
 
-__version__ = "$Revision: 1.10 $"[11:-2]
+__version__ = "$Revision: 1.11 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -108,7 +108,9 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                                     [(dp.getAliasNames() or [dp.id])[0] \
                                     for dp in self.getRRDDataPoints()]), re.I)
             sql = sql[:where_s - 6] + sql[where_e:]
-            sql = re.sub(FROMPAT, lambda m: m.group(0).replace(m.group(1),
+            newCols=[k for k in kbs.keys() if k.upper() not in sql_u[:where_s]]
+            if newCols and '*' not in sql[:where_s]:
+                sql = re.sub(FROMPAT, lambda m: m.group(0).replace(m.group(1),
                             ',' + ','.join(kbs.keys()) + m.group(1), 1), sql)
         except: return sql, {}
         return sql, kbs
@@ -200,6 +202,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             write('')
             zp = self.dmd.ZenPackManager.packs._getOb(
                                     'ZenPacks.community.SQLDataSource', None)
+            sql = sql.replace('"', '\\"')
             command = "env PYTHONPATH=\"%s\" python %s -c \"%s\" -q \"%s\" -f \"%s\" -a \"%s\""%(
                                                 os.pathsep.join(sys.path),
                                                 zp.path('SQLClient.py'),cs,sql,
