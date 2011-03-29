@@ -12,11 +12,11 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.8 2011/03/23 00:54:45 egor Exp $"""
+$Id: zenperfsql.py,v 1.9 2011/03/29 22:50:11 egor Exp $"""
 
-__version__ = "$Revision: 1.8 $"[11:-2]
+__version__ = "$Revision: 1.9 $"[11:-2]
 
-import logging
+import pysamba.twisted.reactor
 
 import Globals
 import zope.component
@@ -50,6 +50,7 @@ unused(DeviceProxy)
 #
 # creating a logging context for this module to use
 #
+import logging
 log = logging.getLogger("zen.zenperfsql")
 
 #

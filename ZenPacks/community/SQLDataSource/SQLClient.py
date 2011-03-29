@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.9 2011/03/18 20:49:42 egor Exp $"""
+$Id: SQLClient.py,v 1.10 2011/03/29 22:50:55 egor Exp $"""
 
-__version__ = "$Revision: 1.9 $"[11:-2]
+__version__ = "$Revision: 1.10 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -179,6 +179,8 @@ class SQLClient(BaseClient):
                 for query, resMaps in queries.iteritems():
                     log.debug("SQL Query: %s", query)
                     try:
+                        if not getattr(self._dbpool, 'running', False):
+                            raise StandardError, 'ConnectionPool not ready'
                         yield self._dbpool.runInteraction(_execute, query)
                         results.update(self.parseResults(driver.next(),resMaps))
                     except StandardError, ex:

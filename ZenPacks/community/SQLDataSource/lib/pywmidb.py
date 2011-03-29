@@ -20,15 +20,15 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.3'
+__version__ = '1.0.4'
 
-import platform
+import sys
 import datetime
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 
-if platform.system() == 'Windows':
+if sys.platform == 'win32':
     try:
         import win32com.client
     except:
@@ -97,7 +97,7 @@ else:
 
     WERR_BADFUNC = 1
 
-    if True:
+    if not library.lp_loaded():
         library.lp_load()
         library.dcerpc_init()
         library.dcerpc_table_init()
@@ -487,7 +487,7 @@ class pysambaCnx:
             result = library.IEnumWbemClassObject_SmartNext(
                         self._pEnum,
                         self._ctx,
-                        -1,
+                        10000,
                         self._chunkSize,
                         self._objs,
                         byref(self._count))
@@ -574,10 +574,6 @@ class pysambaCnx:
         """
         Commit transaction which is currently in progress.
         """
-        if self._ctx:
-            return
-        else:
-            raise InterfaceError, "Connection is closed."
         return
 
     def rollback(self):
@@ -676,10 +672,6 @@ class win32comCnx:
         """
         Commit transaction which is currently in progress.
         """
-        if self._cnx:
-            return
-        else:
-            raise InterfaceError, "Connection is closed."
         return
 
     def rollback(self):
@@ -721,7 +713,7 @@ def Connect(*args, **kwargs):
                             )
     """
 
-    if platform.system() == 'Windows':
+    if sys.platform == 'win32':
         return win32comCnx(*args, **kwargs)
     else:
         return pysambaCnx(*args, **kwargs)

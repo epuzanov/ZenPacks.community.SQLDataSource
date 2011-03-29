@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.2'
+__version__ = '1.0.3'
 
 try:
     import pywbem
@@ -449,10 +449,6 @@ class pywbemCnx:
         """
         Commit transaction which is currently in progress.
         """
-        if self._cnx:
-            return
-        else:
-            raise InterfaceError, "Connection is closed."
         return
 
     def rollback(self):

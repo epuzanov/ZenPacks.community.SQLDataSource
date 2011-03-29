@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 from xml.dom.minidom import parseString
 from xml.dom.minicompat import NodeList
@@ -29,8 +29,8 @@ import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 
-import platform
-if platform.system() == 'Windows':
+import sys
+if sys.platform == 'win32':
     try:
         import win32com.client
     except:
@@ -366,10 +366,6 @@ class baseCnx:
         """
         Commit transaction which is currently in progress.
         """
-        if self._cnx:
-            return
-        else:
-            raise InterfaceError, "Connection is closed."
         return
 
     def rollback(self):
@@ -562,7 +558,7 @@ def Connect(*args, **kwargs):
                 namespace='http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2')
     """
 
-    if platform.system() == 'Windows':
+    if sys.platform == 'win32':
         return win32comCnx(*args, **kwargs)
     else:
         return pywsmanCnx(*args, **kwargs)
