@@ -20,9 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.4'
+__version__ = '1.0.5'
 
-import sys
+import sys 
 import datetime
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
@@ -377,10 +377,7 @@ class pysambaCnx:
         self._host = kwargs['host']
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
-        self._wctx = POINTER(IWbemContext)()
-        self._chunkSize = 10
-        self._objs = (POINTER(WbemClassObject)*self._chunkSize)()
-        self._count = uint32_t()
+        self._chunkSize = 5
 
         try:
             library.com_init_ctx(byref(self._ctx), None)
@@ -403,7 +400,7 @@ class pysambaCnx:
                         None,               # locale
                         flags.value,        # flags
                         None,               # authority 
-                        self._wctx,         # wbem_ctx 
+                        None,               # wbem_ctx 
                         byref(self._pWS))   # services 
             WERR_CHECK(result, self._host, "Connect")
 
@@ -468,7 +465,7 @@ class pysambaCnx:
         Execute WQL query and fetch first row
         """
         try:
-            self._pEnum = POINTER(IEnumWbemClassObject)()
+            pEnum = POINTER(IEnumWbemClassObject)()
             props, classname, kbs = WQLPAT.match(query).groups('')
             result = library.IWbemServices_ExecQuery(
                         self._pWS,
@@ -478,23 +475,25 @@ class pysambaCnx:
                         WBEM_FLAG_RETURN_IMMEDIATELY | \
                         WBEM_FLAG_ENSURE_LOCATABLE,
                         None,
-                        byref(self._pEnum))
+                        byref(pEnum))
             WERR_CHECK(result, self._host, "ExecQuery")
-            result = library.IEnumWbemClassObject_Reset(self._pEnum, self._ctx)
+            result = library.IEnumWbemClassObject_Reset(pEnum, self._ctx)
             WERR_CHECK(result, self._host, "Reset result of WMI query.");
-            assert self._pEnum
+            assert pEnum
+            objs = (POINTER(WbemClassObject)*self._chunkSize)()
+            count = uint32_t()
             library.talloc_increase_ref_count(self._ctx)
             result = library.IEnumWbemClassObject_SmartNext(
-                        self._pEnum,
+                        pEnum,
                         self._ctx,
                         10000,
                         self._chunkSize,
-                        self._objs,
-                        byref(self._count))
+                        objs,
+                        byref(count))
             WERR_CHECK(result, self._host, "Retrieve result data.")
-            if self._count.value == 0: return None, []
-            klass = self._objs[0].contents.obj_class.contents
-            inst = self._objs[0].contents.instance.contents
+            if count.value == 0: return None, []
+            klass = objs[0].contents.obj_class.contents
+            inst = objs[0].contents.instance.contents
             typedict = {}
             maxlen = {}
             cimkey = {}
@@ -522,10 +521,10 @@ class pysambaCnx:
                             maxlen.get(pname, None), maxlen.get(pname, None),
                             None, None, None) for pname in props])
             rows = []
-            while self._count.value > 0:
-                for i in range(self._count.value):
-                    klass = self._objs[i].contents.obj_class.contents
-                    inst = self._objs[i].contents.instance.contents
+            while count.value > 0:
+                for i in range(count.value):
+                    klass = objs[i].contents.obj_class.contents
+                    inst = objs[i].contents.instance.contents
                     pdict = {'_class_name': getattr(klass, '__CLASS', '')}
                     kbs = []
                     for j in range(getattr(klass, '__PROPERTY_COUNT')):
@@ -538,15 +537,18 @@ class pysambaCnx:
                             kbs.append(cimkey[prop.name]%value)
                     pdict['__path'] = pdict['_class_name'] + '.' + ','.join(kbs)
                     rows.append(tuple([pdict.get(p, None) for p in props]))
-                assert self._pEnum
+                    talloc_free(objs[i])
+                assert pEnum
+                objs = (POINTER(WbemClassObject)*self._chunkSize)()
+                count = uint32_t()
                 library.talloc_increase_ref_count(self._ctx)
                 result = library.IEnumWbemClassObject_SmartNext(
-                        self._pEnum,
+                        pEnum,
                         self._ctx,
-                        -1,
+                        10000,
                         self._chunkSize,
-                        self._objs,
-                        byref(self._count))
+                        objs,
+                        byref(count))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
             talloc_free(self._ctx)
             return descr, rows

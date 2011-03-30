@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 1.10 2011/03/29 22:50:55 egor Exp $"""
+$Id: SQLClient.py,v 1.11 2011/03/30 20:39:23 egor Exp $"""
 
-__version__ = "$Revision: 1.10 $"[11:-2]
+__version__ = "$Revision: 1.11 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -80,7 +80,7 @@ class SQLClient(BaseClient):
         self.plugins = {}
         self.results = {}
         self.plugins = dict([(plugin.name(), plugin) for plugin in plugins])
-        self._dbpool = None
+        self._dbpools = {}
 
 
     def parseError(self, err, query, resMaps):
@@ -123,13 +123,24 @@ class SQLClient(BaseClient):
                     else:
                         kwargs[var.strip()] = int(val.strip())
                 except: args.append(arg)
-        return adbapi.ConnectionPool(*args, **kwargs)
+        if not getattr(self._dbpools.get(cs), 'running', False):
+            self._dbpools[cs] = adbapi.ConnectionPool(*args, **kwargs)
+            self._dbpools[cs].min = 1
+            self._dbpools[cs].max = 1
+
+
+    def closePool(self, cs=None):
+        if cs in self._dbpools:
+            if hasattr(self._dbpools[cs], 'close'):
+                self._dbpools[cs].close()
+            del self._dbpools[cs]
 
 
     def close(self):
-        if hasattr(self._dbpool, 'close'):
-            self._dbpool.close()
-        self._dbpool = None
+        for cs, dbpool in self._dbpools.iteritems():
+            if hasattr(dbpool, 'close'):
+                dbpool.close()
+            del self._dbpools[cs]
 
 
     def parseResults(self, rows, resMaps):
@@ -175,17 +186,17 @@ class SQLClient(BaseClient):
         def inner(driver):
             try:
                 results = {}
-                self._dbpool = self.makePool(cs)
+                self.makePool(cs)
                 for query, resMaps in queries.iteritems():
                     log.debug("SQL Query: %s", query)
+                    if not getattr(self._dbpools.get(cs, ''), 'running', False):
+                        raise StandardError, 'ConnectionPool not ready'
                     try:
-                        if not getattr(self._dbpool, 'running', False):
-                            raise StandardError, 'ConnectionPool not ready'
-                        yield self._dbpool.runInteraction(_execute, query)
+                        yield self._dbpools[cs].runInteraction(_execute, query)
                         results.update(self.parseResults(driver.next(),resMaps))
                     except StandardError, ex:
                         results.update(self.parseError(ex, query, resMaps))
-                self.close()
+                self.closePool(cs)
                 log.debug("results: %s", results)
                 yield defer.succeed(results)
                 driver.next()

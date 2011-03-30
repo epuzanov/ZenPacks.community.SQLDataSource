@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 1.9 2011/03/29 22:50:11 egor Exp $"""
+$Id: zenperfsql.py,v 1.10 2011/03/30 20:42:50 egor Exp $"""
 
-__version__ = "$Revision: 1.9 $"[11:-2]
+__version__ = "$Revision: 1.10 $"[11:-2]
 
 import pysamba.twisted.reactor
 
@@ -140,9 +140,9 @@ class ZenPerfSqlTaskSplitter(object):
         for cs in queries.keys():
             self._taskFactory.reset()
             self._taskFactory.config = newconfigs.get(cs)
-            configId = self._taskFactory.config.id +'_'+ md5.new(cs).hexdigest()
-            self._taskFactory.name = configId
-            self._taskFactory.configId = configId
+            taskName = md5.new(cs + str(DateTime())).hexdigest()
+            self._taskFactory.name = taskName
+            self._taskFactory.configId = taskName
             self._taskFactory.interval = config.configCycleInterval
             self._taskFactory.config.queries = queries.get(cs, {})
             self._taskFactory.config.datapoints = datapoints.get(cs, [])
@@ -150,7 +150,7 @@ class ZenPerfSqlTaskSplitter(object):
             self._taskFactory.config.connectionString = cs
             task = self._taskFactory.build()
 
-            tasks[configId] = task
+            tasks[taskName] = task
         return tasks
 
 # Create an implementation of the ICollectorPreferences interface so that the
