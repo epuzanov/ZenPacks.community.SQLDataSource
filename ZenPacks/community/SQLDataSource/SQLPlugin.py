@@ -12,15 +12,13 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 1.5 2011/03/18 20:50:25 egor Exp $"""
+$Id: SQLPlugin.py,v 2.0 2011/05/03 22:28:25 egor Exp $"""
 
-__version__ = "$Revision: 1.5 $"[11:-2]
+__version__ = "$Revision: 2.0 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
-from Products.ZenUtils.Driver import drive
 from twisted.python.failure import Failure
-from twisted.internet import defer
-from SQLClient import SQLClient, sortQueries
+from SQLClient import SQLClient
 
 class SQLPlugin(CollectorPlugin):
     """
@@ -34,26 +32,17 @@ class SQLPlugin(CollectorPlugin):
     def queries(self, device=None):
         return self.tables
 
+
     def prepareQueries(self, device=None):
         return self.queries(device)
 
+
     def collect(self, device, log):
-        def inner(driver):
-            results = {}
-            for cs, q in queries.iteritems():
-                try:
-                    sqlcl = SQLClient(device, cs=cs)
-                    yield sqlcl.query(q)
-                    results.update(driver.next())
-                except:
-                    log.error('Error in query %s', q)
-            yield defer.succeed(results)
-            driver.next()
-        try:
-            queries = sortQueries(self.prepareQueries(device))
-            return drive(inner)
-        except:
-            return Failure('Syntax error in query') 
+        cl = SQLClient(device)
+        results = cl.syncQuery(self.prepareQueries(device))
+        cl = None
+        return results
+
 
     def preprocess(self, results, log):
         newres = {}
@@ -64,3 +53,4 @@ class SQLPlugin(CollectorPlugin):
                     continue
             newres[table] = value
         return newres
+

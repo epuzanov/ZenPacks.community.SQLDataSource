@@ -17,10 +17,10 @@ class ZenPack(ZenPackBase):
     """ SQLDataSource loader
     """
 
-    _gdmap = (('Event Queue', 'eventQueueLength'),
-            ('Data Point Rate', 'dataPoints'),
-            ('Config Time', 'configTime'),
-            ('Data Points', 'cyclePoints'))
+    _gdmap = (('Event Queue', 'eventQueueLength', True, '%6.0lf'),
+            ('Data Point Rate', 'dataPoints', True, '%5.2lf%s'),
+            ('Config Time', 'configTime', False, '%5.2lf%s'),
+            ('Data Points', 'cyclePoints', False, '%5.2lf%s'))
 
     def install(self, app):
         if not hasattr(app.zport.dmd.Events.Status, 'PyDBAPI'):
@@ -29,7 +29,7 @@ class ZenPack(ZenPackBase):
         if hasattr(pct.datasources, 'zenperfsql'):
             pct.manage_deleteRRDDataSources(['zenperfsql'])
         ds = pct.manage_addRRDDataSource('zenperfsql', 'BuiltInDS.Built-In')
-        for gdn, dpn in self._gdmap:
+        for gdn, dpn, stacked, format in self._gdmap:
             dp = ds.manage_addRRDDataPoint(dpn)
             if dpn in ['dataPoints']:
                 dp.rrdtype = 'DERIVE'
@@ -39,6 +39,8 @@ class ZenPack(ZenPackBase):
             if hasattr(gd.graphPoints, 'zenperfsql'): continue
             gdp = gd.createGraphPoint(DataPointGraphPoint, 'zenperfsql')
             gdp.dpName = 'zenperfsql_%s'%dpn
+            gdp.format = format
+            gdp.stacked = stacked
         ZenPackBase.install(self, app)
 
     def upgrade(self, app):
@@ -48,7 +50,7 @@ class ZenPack(ZenPackBase):
         if hasattr(pct.datasources, 'zenperfsql'):
             pct.manage_deleteRRDDataSources(['zenperfsql'])
         ds = pct.manage_addRRDDataSource('zenperfsql', 'BuiltInDS.Built-In')
-        for gdn, dpn in self._gdmap:
+        for gdn, dpn, stacked, format in self._gdmap:
             dp = ds.manage_addRRDDataPoint(dpn)
             if dpn in ['dataPoints']:
                 dp.rrdtype = 'DERIVE'
@@ -58,11 +60,13 @@ class ZenPack(ZenPackBase):
             if hasattr(gd.graphPoints, 'zenperfsql'): continue
             gdp = gd.createGraphPoint(DataPointGraphPoint, 'zenperfsql')
             gdp.dpName = 'zenperfsql_%s'%dpn
+            gdp.format = format
+            gdp.stacked = stacked
         ZenPackBase.upgrade(self, app)
 
     def remove(self, app, leaveObjects=False):
         pct = app.zport.dmd.Monitors.rrdTemplates.PerformanceConf
-        for gdn, dpn in self._gdmap:
+        for gdn, dpn, stacked, format in self._gdmap:
             gd = getattr(pct.graphDefs, gdn, None)
             if not gd: continue
             gd.manage_deleteGraphPoints(['zenperfsql'])

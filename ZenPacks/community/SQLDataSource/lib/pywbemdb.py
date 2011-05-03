@@ -20,13 +20,14 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.3'
+__version__ = '1.1.0'
 
 try:
     import pywbem
 except:
     raise StandardError, "Can't import pywbem module. Please, install pywbem first."
 
+import threading
 import datetime
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -243,7 +244,8 @@ class wbemCursor(object):
         if not self.connection:
             raise InterfaceError, "Connection closed."
         self.description = None
-        self._rows = []
+        self.rownumber = -1
+        del self._rows[:]
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -255,7 +257,7 @@ class wbemCursor(object):
             operation = operation%args[0]
 
         try:
-            self.description, self._rows = self.connection._execute(operation)
+            self.connection._execute(self, operation)
             if self.description: self.rownumber = 0
 
         except OperationalError, e:
@@ -285,26 +287,36 @@ class wbemCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        if self.rownumber >= len(self._rows): return None
-        result = self._rows[self.rownumber]
-        self.rownumber = self.rownumber+1
-        return result
+        return self.connection._fetchone(self)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        end = self.rownumber + (size or self.arraysize)
-        result = self._rows[self.rownumber:end]
-        self.rownumber = min(end, len(self._rows))
-        return result
+        if not size: size = self.arraysize
+        results = []
+        while size and row:
+            results.append(row)
+            size -= 1
+            if size: row = self.connection._fetchone(self)
+        return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
-        result = self.rownumber and self._rows[self.rownumber:] or self._rows
-        self.rownumber = len(self._rows)
-        return result
+        results = []
+        row = self.connection._fetchone(self)
+        while row:
+            results.append(row)
+            row = self.connection._fetchone(self)
+        return results
+
+    def next(self):
+        """Fetches a single row from the cursor. None indicates that
+        no more rows are available."""
+        row = self.connection._fetchone(self)
+        if not row: raise StopIteration
+        return row
 
     def __iter__(self):
         """
@@ -312,8 +324,7 @@ class wbemCursor(object):
         Python iteration protocol.
         """
         self._check_executed()
-        result = self.rownumber and self._rows[self.rownumber:] or self._rows
-        return iter(result)
+        return self
 
     def setinputsizes(self, sizes=None):
         """
@@ -334,17 +345,19 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._host = kwargs['host']
-        url = '%s://%s:%s'%(kwargs['scheme'], kwargs['host'], kwargs['port'])
+        self._host = kwargs.get('host', 'localhost')
+        url = '%s://%s:%s'%(kwargs.get('scheme', 'https'), self._host,
+                                                int(kwargs.get('port', 5989)))
         self._cnx = pywbem.WBEMConnection(url,
-                                        (kwargs['user'], kwargs['password']),
-                                        default_namespace=kwargs['namespace'])
+                        (kwargs.get('user', ''), kwargs.get('password', '')),
+                        default_namespace=kwargs.get('namespace', 'root/cimv2'))
+        self._lock = threading.RLock()
 
     def _convert(self, value, is_array):
         """
         Convert CIM types to Python standard types.
         """
-        if not value: return None
+        if not value or value == 'NULL': return None
         if is_array:
             return [self._convert(v, None) for v in value]
         if isinstance(value, pywbem.Uint8): return int(value)
@@ -361,6 +374,7 @@ class pywbemCnx:
             return datetime.datetime(*value.datetime.utctimetuple()[:7])
         return value
 
+
     def _parseType(self, ptype, is_array):
         """
         Convert CIM types string to CIMTYPE value.
@@ -373,68 +387,88 @@ class pywbemCnx:
                 'datetime':CIM_DATETIME, 'reference':CIM_REFERENCE,
                 'char16':CIM_CHAR16}.get(ptype, 0)
 
-    def _execute(self, operation):
+
+    def _execute(self, cursor, operation):
         """
         Execute Query
         """
+        if self._cnx is None:
+            raise InterfaceError, "Connection closed."
         try:
             props, classname, kbs = WQLPAT.match(operation).groups('')
         except:
             raise ProgrammingError, "Syntax error in the WQL statement."
-        kwargs = {"IncludeQualifiers":True, "LocalOnly":False}
+        kwargs = {"IncludeQualifiers":False, "LocalOnly":False}
         if props != '*':
-            plist = set(props.replace(' ', '').split(','))
-            if '__path' in plist: plist.remove('__path')
+            plist = [p for p in set(props.replace(' ', '').split(',')) \
+                        if p.upper() not in ['__PATH','__CLASS','__NAMESPACE']]
             kwargs["PropertyList"] = list(plist)
+        self._lock.acquire()
         try:
-            if kbs:
-                try:
-                    kbs=eval('(lambda **kwargs:kwargs)(%s)'%ANDPAT.sub(',',kbs))
-                    instancename = pywbem.CIMInstanceName(classname, kbs)
-                    results = [self._cnx.GetInstance(instancename, **kwargs)]
-                except SyntaxError:
-                    results = self._cnx.ExecQuery('WQL', operation)
-                    if isinstance(results, pywbem.CIMInstance):
-                        results = [results]
-                    if not results:
-                        raise
-            else:
-                results = self._cnx.EnumerateInstances(classname,**kwargs)
-        except pywbem.CIMError, e:
-            raise InterfaceError, e
-        except pywbem.cim_http.AuthError:
-            raise InterfaceError, "Bad credentials."
-        try:
-            typedict = {}
-            maxlen = {}
-            for pname, prop in results[0].properties.iteritems():
-                if not prop: continue
-                typedict[pname] = self._parseType(prop.type,
-                                                    prop.is_array)
-                if 'maxlen' in prop.qualifiers:
-                    maxlen[pname] = prop.qualifiers['MaxLen'].value
-            typedict['__path'] = CIM_STRING
-            if '*' in props:
-                props = typedict.keys()
-            else:
-                props = props.replace(' ','').split(',')
-            descr = tuple([(pname, typedict.get(pname, CIM_STRING),
-                            maxlen.get(pname, None), maxlen.get(pname, None),
-                            None, None, None) for pname in props])
-            rows = []
-            for ob in results:
-                pdict = dict([(pname, self._convert(p.value, p.is_array)) \
-                                    for pname, p in ob.properties.iteritems()])
-                pdict['__path'] = str(ob.path).split(':', 1)[1]
-                rows.append(tuple([pdict.get(pname, None) for pname in props]))
-            return descr, rows
+            try:
+                cl = self._cnx.GetClass(classname)
+                if '*' in props:
+                    props = cl.properties.keys()
+                    props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
+                else:
+                    props = props.replace(' ','').split(',')
+                descr = []
+                for pname in props:
+                    prop = cl.properties.get(pname, None)
+                    if prop:
+                        ptype = self._parseType(prop.type, prop.is_array)
+                        maxlen = getattr(prop.qualifiers.get('MaxLen', None),
+                                                                'value', None)
+                    else:
+                        ptype = CIM_STRING
+                        maxlen = None
+                    descr.append((pname,ptype,maxlen,maxlen,None,None,None))
+                cursor.description = tuple(descr)
+                if kbs:
+                    try:
+                        kbs = eval('(lambda **kwargs:kwargs)(%s)'%ANDPAT.sub(
+                                                                    ',', kbs))
+                        instancename = pywbem.CIMInstanceName(classname, kbs)
+                        results = [self._cnx.GetInstance(instancename,**kwargs)]
+                    except SyntaxError:
+                        results=self._cnx.EnumerateInstances(classname,**kwargs)
+                else:
+                    results = self._cnx.EnumerateInstances(classname, **kwargs)
+                while results:
+                    ob = results.pop(0)
+                    row = []
+                    for col in cursor.description:
+                        prop = ob.properties.get(col[0], None)
+                        if prop:
+                            row.append(self._convert(prop.value, prop.is_array))
+                        elif col[0].upper() == '__NAMESPACE':
+                            row.append(str(ob.path).split(':')[0])
+                        elif col[0].upper() == '__CLASS':
+                            row.append(str(ob.classname))
+                        elif col[0].upper() == '__PATH': row.append(str(ob.path))
+                        else: row.append(None)
+                    cursor._rows.append(tuple(row))
+                    ob = None
 
-        except IndexError, e:
-            raise OperationalError, "No data available."
-        except pywbem.CIMError, e:
-            raise OperationalError, e
-        except Exception, e:
-            raise OperationalError, e
+            except IndexError, e:
+                raise OperationalError, "No data available."
+            except pywbem.CIMError, e:
+                raise InterfaceError, e
+            except pywbem.cim_http.AuthError:
+                self.close()
+                raise InterfaceError, "Bad credentials."
+            except Exception, e:
+                raise OperationalError, e
+        finally:
+            self._lock.release()
+
+    def _fetchone(self, cursor):
+        """Fetches a single row from the cursor rows cache. None indicates that
+        no more rows are available."""
+        if cursor._rows:
+            cursor.rownumber += 1
+            return cursor._rows.pop(0)
+        else: return None
 
     def __del__(self):
         self.close()
@@ -443,7 +477,7 @@ class pywbemCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        self._ctx = None
+        self._cnx = None
 
     def commit(self):
         """
@@ -502,6 +536,6 @@ __all__ = [ 'BINARY', 'Binary', 'Connect', 'Connection', 'DATE',
     'Date', 'Time', 'Timestamp', 'DateFromTicks', 'TimeFromTicks',
     'TimestampFromTicks', 'DataError', 'DatabaseError', 'Error',
     'FIELD_TYPE', 'IntegrityError', 'InterfaceError', 'InternalError',
-    'MySQLError', 'NULL', 'NUMBER', 'NotSupportedError', 'DBAPITypeObject',
+    'NULL', 'NUMBER', 'NotSupportedError', 'DBAPITypeObject',
     'OperationalError', 'ProgrammingError', 'ROWID', 'STRING', 'TIME',
     'TIMESTAMP', 'Warning', 'apilevel', 'connect', 'paramstyle','threadsafety']

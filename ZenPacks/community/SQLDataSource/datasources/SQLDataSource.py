@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 1.11 2011/03/24 16:51:39 egor Exp $"""
+$Id: SQLDataSource.py,v 2.0 2011/05/03 22:30:38 egor Exp $"""
 
-__version__ = "$Revision: 1.11 $"[11:-2]
+__version__ = "$Revision: 2.0 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -27,6 +27,7 @@ import cgi
 import time
 import os
 import re
+import sys
 
 class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
@@ -103,7 +104,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         else: where_e = len(sql)
         try:
             where = re.compile(' AND ', re.I).sub(',', sql[where_s:where_e])
-            kbs = eval('(lambda **kwargs: kwargs)(%s)'%where)
+            kbs = eval('(lambda **kws:kws)(%s)'%where.encode('string-escape'))
             FROMPAT = re.compile('[%s]\]?(\s+)FROM\s'%'|'.join(
                                     [(dp.getAliasNames() or [dp.id])[0] \
                                     for dp in self.getRRDDataPoints()]), re.I)
@@ -190,27 +191,22 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
         start = time.time()
         try:
-            import sys
+            from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
             sql, sqlp, kbs, cs = self.getQueryInfo(device)
-            if not sql:
-                raise StandardError('query is empty')
+            if not sql: raise StandardError('query is empty')
             sql = sql.replace('$','\\$')
             properties = dict([(
                         dp.getAliasNames() and dp.getAliasNames()[0] or dp.id,
                         dp.id) for dp in self.getRRDDataPoints()])
             write('Executing query: "%s"'%sql)
             write('')
-            zp = self.dmd.ZenPackManager.packs._getOb(
-                                    'ZenPacks.community.SQLDataSource', None)
-            sql = sql.replace('"', '\\"')
-            command = "env PYTHONPATH=\"%s\" python %s -c \"%s\" -q \"%s\" -f \"%s\" -a \"%s\""%(
-                                                os.pathsep.join(sys.path),
-                                                zp.path('SQLClient.py'),cs,sql,
-                                                " ".join(properties.keys()),
-                                                " ".join(properties.values()))
-            executeStreamCommand(command, writeLines)
+            cl = SQLClient()
+            rows = cl.syncQuery({'t':(sql, kbs, cs, properties)}).get('t', [{}])
+            cl = None
+            write('|'.join(rows[0].keys()))
+            for row in rows:
+                write('|'.join(map(str, row.values())))
         except:
-            import sys
             write('exception while executing command')
             write('type: %s  value: %s' % tuple(sys.exc_info()[:2]))
         write('')

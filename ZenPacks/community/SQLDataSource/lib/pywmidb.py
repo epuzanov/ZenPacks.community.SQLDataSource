@@ -20,8 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.5'
+__version__ = '1.1.0'
 
+import threading
 import sys 
 import datetime
 import re
@@ -242,19 +243,13 @@ class wmiCursor(object):
         self.description = None
         self.rownumber = -1
         self.arraysize = 1
+        self._pEnum = None
+        self._kbIdx = []
+        self._pIdx = []
         self._rows = []
 
-    @property
-    def rowcount(self):
-        """
-        Returns number of rows affected by last operation. In case
-        of SELECTs it returns meaningful information only after
-        all rows has been fetched.
-        """
-        return len(self._rows)
-
     def _check_executed(self):
-        if not self.connection:
+        if not getattr(self.connection, '_ctx', None):
             raise InterfaceError, "Connection closed."
         if not self.description:
             raise OperationalError, "No data available. execute() first."
@@ -266,8 +261,11 @@ class wmiCursor(object):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
+        del self._kbIdx[:]
+        del self._pIdx[:]
+        del self._rows[:]
+        self._pEnum = None
         self.description = None
-        self.connection = None
 
     def execute(self, operation, *args):
         """
@@ -280,10 +278,10 @@ class wmiCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not self.connection:
+        if not getattr(self.connection, '_ctx', None):
             raise InterfaceError, "Connection closed."
         self.description = None
-        self._rows = []
+        self.rownumber = -1
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -295,7 +293,7 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            self.description, self._rows = self.connection._execute(operation)
+            self.connection._execute(self, operation.encode('string-escape'))
             if self.description: self.rownumber = 0
 
         except OperationalError, e:
@@ -325,26 +323,37 @@ class wmiCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        if self.rownumber >= len(self._rows): return None
-        result = self._rows[self.rownumber]
-        self.rownumber = self.rownumber+1
-        return result
+        return self.connection._fetchone(self)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        end = self.rownumber + (size or self.arraysize)
-        result = self._rows[self.rownumber:end]
-        self.rownumber = min(end, len(self._rows))
-        return result
+        if not size: size = self.arraysize
+        results = []
+        row = self.connection._fetchone(self)
+        while size and row:
+            results.append(row)
+            size -= 1
+            if size: row = self.connection._fetchone(self)
+        return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
-        result = self.rownumber and self._rows[self.rownumber:] or self._rows
-        self.rownumber = len(self._rows)
-        return result
+        results = []
+        row = self.connection._fetchone(self)
+        while row:
+            results.append(row)
+            row = self.connection._fetchone(self)
+        return results
+
+    def next(self):
+        """Fetches a single row from the cursor. None indicates that
+        no more rows are available."""
+        row = self.connection._fetchone(self)
+        if not row: raise StopIteration
+        return row
 
     def __iter__(self):
         """
@@ -352,8 +361,7 @@ class wmiCursor(object):
         Python iteration protocol.
         """
         self._check_executed()
-        result = self.rownumber and self._rows[self.rownumber:] or self._rows
-        return iter(result)
+        return self
 
     def setinputsizes(self, sizes=None):
         """
@@ -373,42 +381,46 @@ class pysambaCnx:
     """
     This class represent an WMI Connection connection.
     """
+
     def __init__(self, *args, **kwargs):
-        self._host = kwargs['host']
+        self._lock = threading.RLock()
+        self._host = kwargs.get('host', None)
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
-        self._chunkSize = 5
+        self._wmibatchSize = kwargs.get('wmibatchSize', 5)
 
         try:
             library.com_init_ctx(byref(self._ctx), None)
 
-            creds = kwargs['user'] + '%' + kwargs['password']
+            creds = kwargs.get('user', '') + '%' + kwargs.get('password', '')
             cred = library.cli_credentials_init(self._ctx)
             library.cli_credentials_set_conf(cred)
             library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
             library.dcom_client_init(self._ctx, cred)
-#            library.lp_do_parameter(-1, "client ntlmv2 auth", 'yes')
+            library.lp_do_parameter(-1, "client ntlmv2 auth",
+                                    kwargs.get('ntlmv2', 'no').lower())
 
             flags = uint32_t()
             flags.value = 0
             result = library.WBEM_ConnectServer(
-                        self._ctx,          # com_ctx
-                        self._host,         # server
-                        kwargs['namespace'],# namespace
-                        None,               # user
-                        None,               # password
-                        None,               # locale
-                        flags.value,        # flags
-                        None,               # authority 
-                        None,               # wbem_ctx 
-                        byref(self._pWS))   # services 
+                        self._ctx,                             # com_ctx
+                        self._host,                            # server
+                        kwargs.get('namespace', 'root/cimv2'), # namespace
+                        None,                                  # user
+                        None,                                  # password
+                        kwargs.get('locale', None),            # locale
+                        flags.value,                           # flags
+                        None,                                  # authority 
+                        POINTER(IWbemContext)(),               # wbem_ctx 
+                        byref(self._pWS))                      # services 
             WERR_CHECK(result, self._host, "Connect")
 
         except WError, e:
-            talloc_free(self._ctx)
+            self.close()
             raise InterfaceError, e
+
         except Exception, e:
-            talloc_free(self._ctx)
+            self.close()
             raise InterfaceError, e
 
     def _convertArray(self, arr):
@@ -460,106 +472,176 @@ class pysambaCnx:
             return self._convertArray(v.contents.a_reference)
         return "Unsupported"
 
-    def _execute(self, query):
+    def _execute(self, cursor, query):
         """
         Execute WQL query and fetch first row
         """
+        if self._ctx is None:
+            raise InterfaceError, "Connection closed."
+        self._lock.acquire()
         try:
-            pEnum = POINTER(IEnumWbemClassObject)()
-            props, classname, kbs = WQLPAT.match(query).groups('')
-            result = library.IWbemServices_ExecQuery(
-                        self._pWS,
-                        self._ctx,
-                        "WQL",
-                        query,
-                        WBEM_FLAG_RETURN_IMMEDIATELY | \
-                        WBEM_FLAG_ENSURE_LOCATABLE,
-                        None,
-                        byref(pEnum))
-            WERR_CHECK(result, self._host, "ExecQuery")
-            result = library.IEnumWbemClassObject_Reset(pEnum, self._ctx)
-            WERR_CHECK(result, self._host, "Reset result of WMI query.");
-            assert pEnum
-            objs = (POINTER(WbemClassObject)*self._chunkSize)()
-            count = uint32_t()
-            library.talloc_increase_ref_count(self._ctx)
-            result = library.IEnumWbemClassObject_SmartNext(
-                        pEnum,
-                        self._ctx,
-                        10000,
-                        self._chunkSize,
-                        objs,
-                        byref(count))
-            WERR_CHECK(result, self._host, "Retrieve result data.")
-            if count.value == 0: return None, []
-            klass = objs[0].contents.obj_class.contents
-            inst = objs[0].contents.instance.contents
-            typedict = {}
-            maxlen = {}
-            cimkey = {}
-            for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                prop = klass.properties[j]
-                if not prop.name: continue
-                typedict[prop.name] = int(prop.desc.contents.cimtype)
-                for i in range(prop.desc.contents.qualifiers.count):
-                    q = prop.desc.contents.qualifiers.item[i].contents
-                    if q.name in ['key', 'CIM_Key']:
-                        if not self._convert(q.value, q.cimtype): continue
-                        if prop.desc.contents.cimtype & CIM_TYPEMASK == NUMBER:
-                            cimkey[prop.name] = '%s=%%s'%prop.name
-                        else:
-                            cimkey[prop.name] = '%s="%%s"'%prop.name
-                    if q.name == 'MaxLen':
-                        maxlen[prop.name] = self._convert(q.value, q.cimtype)
-            typedict['__path'] = CIM_STRING
-            if '*' in props:
-                props = typedict.keys()
-            else:
+            try:
+                if cursor._pEnum:
+                    result = library.IUnknown_Release(cursor._pEnum, self._ctx)
+                    WERR_CHECK(result, self._host, "Release")
+                else:
+                    cursor._pEnum = POINTER(IEnumWbemClassObject)()
+                del cursor._rows[:]
+                del cursor._kbIdx[:]
+                del cursor._pIdx[:]
+                props, classname, kbs = WQLPAT.match(query).groups('')
                 props = props.replace(' ','').split(',')
-                if '__path' not in props: cimkey = {}
-            descr = tuple([(pname, typedict.get(pname, CIM_STRING),
-                            maxlen.get(pname, None), maxlen.get(pname, None),
-                            None, None, None) for pname in props])
-            rows = []
-            while count.value > 0:
-                for i in range(count.value):
-                    klass = objs[i].contents.obj_class.contents
-                    inst = objs[i].contents.instance.contents
-                    pdict = {'_class_name': getattr(klass, '__CLASS', '')}
-                    kbs = []
-                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                        prop = klass.properties[j]
-                        if not prop.name: continue
-                        value = self._convert(inst.data[j],
-                                    prop.desc.contents.cimtype & CIM_TYPEMASK)
-                        pdict[prop.name] = value
-                        if prop.name in cimkey:
-                            kbs.append(cimkey[prop.name]%value)
-                    pdict['__path'] = pdict['_class_name'] + '.' + ','.join(kbs)
-                    rows.append(tuple([pdict.get(p, None) for p in props]))
-                    talloc_free(objs[i])
-                assert pEnum
-                objs = (POINTER(WbemClassObject)*self._chunkSize)()
+                if '*' in props: props.remove('*')
+                result = library.IWbemServices_ExecQuery(
+                            self._pWS,
+                            self._ctx,
+                            "WQL",
+                            query,
+                            WBEM_FLAG_FORWARD_ONLY | \
+                            WBEM_FLAG_RETURN_IMMEDIATELY | \
+                            WBEM_FLAG_ENSURE_LOCATABLE,
+                            None,
+                            byref(cursor._pEnum))
+                WERR_CHECK(result, self._host, "ExecQuery")
+                objs = (POINTER(WbemClassObject)*1)()
                 count = uint32_t()
-                library.talloc_increase_ref_count(self._ctx)
                 result = library.IEnumWbemClassObject_SmartNext(
-                        pEnum,
+                            cursor._pEnum,
+                            self._ctx,
+                            -1,
+                            1,
+                            objs,
+                            byref(count))
+                WERR_CHECK(result, self._host, "Retrieve result data.")
+                if count.value == 0: return
+                klass = objs[0].contents.obj_class.contents
+                inst = objs[0].contents.instance.contents
+                pdict = {}
+                cimclass = getattr(klass, '__CLASS', '')
+                cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
+                                            '').replace('\\', '/')
+                iPath = '%s:%s.'%(cimnamespace, cimclass)
+                for j in range(getattr(klass, '__PROPERTY_COUNT')):
+                    prop = klass.properties[j]
+                    if not prop.name: continue
+                    ptype = prop.desc.contents.cimtype & CIM_TYPEMASK
+                    if ptype == STRING or not props or '__path' in props:
+                        null_ok = None
+                        maxlen = None
+                        for i in range(prop.desc.contents.qualifiers.count):
+                            q = prop.desc.contents.qualifiers.item[i].contents
+                            if q.name in ['key']:
+                                if j in cursor._kbIdx: continue
+                                if self._convert(q.value, q.cimtype):
+                                    cursor._kbIdx.append(j)
+                                    null_ok = False
+                                    value = self._convert(inst.data[j], ptype)
+                                    iPath = iPath + str(prop.name)
+                                    if ptype == NUMBER:
+                                        iPath = '%s=%s,'%(iPath, value)
+                                    else:
+                                        iPath = '%s="%s",'%(iPath, value)
+                            if q.name == 'MaxLen':
+                                maxlen = self._convert(q.value, q.cimtype)
+                        pdict[prop.name] = [prop.name, ptype, maxlen, maxlen,
+                                                        None, None, null_ok, j]
+                    else:
+                        pdict[prop.name] = [prop.name, ptype, None, None, None,
+                                                                None, None, j]
+                iPath = iPath[:-1]
+                if not props:
+                    props = pdict.keys()
+                    props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
+                descr = []
+                row = []
+                for pn in props:
+                    rDescr = pdict.get(pn,[pn,8,None,None,None,None,None,-1])
+                    pIdx = rDescr.pop()
+                    cursor._pIdx.append(pIdx)
+                    descr.append(tuple(rDescr))
+                    if pn.upper() == '__NAMESPACE': row.append(cimnamespace)
+                    elif pn.upper() == '__CLASS': row.append(cimclass)
+                    elif pn.upper() == '__PATH': row.append(iPath)
+                    elif pIdx == -1: row.append(None)
+                    else: row.append(self._convert(inst.data[pIdx], rDescr[1]))
+                cursor.description = tuple(descr)
+                cursor._rows.append(tuple(row))
+                talloc_free(objs[0])
+                pdict.clear()
+
+            except WError, e:
+                raise OperationalError, e
+
+            except Exception, e:
+                raise OperationalError, e
+        finally:
+            objs = None
+            count = None
+            self._lock.release()
+
+
+    def _fetchone(self, cursor):
+        """
+        Execute WQL query and fetch first row
+        """
+        if self._ctx is None:
+            raise InterfaceError, "Connection closed."
+        if cursor._rows:
+            cursor.rownumber += 1
+            return cursor._rows.pop(0)
+        if not cursor._pEnum: return None
+        self._lock.acquire()
+        try:
+            try:
+                objs = (POINTER(WbemClassObject)*self._wmibatchSize)()
+                count = uint32_t()
+                result = library.IEnumWbemClassObject_SmartNext(
+                        cursor._pEnum,
                         self._ctx,
-                        10000,
-                        self._chunkSize,
+                        -1,
+                        self._wmibatchSize,
                         objs,
                         byref(count))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
-            talloc_free(self._ctx)
-            return descr, rows
+                for i in range(count.value):
+                    row = []
+                    klass = objs[i].contents.obj_class.contents
+                    inst = objs[i].contents.instance.contents
+                    cimclass = getattr(klass, '__CLASS', '')
+                    cimnamespace = getattr(objs[i].contents, '__NAMESPACE',
+                                            '').replace('\\', '/')
+                    for j, rd in zip(cursor._pIdx, cursor.description):
+                        if rd[0].upper() == '__NAMESPACE': row.append(cimnamespace)
+                        elif rd[0].upper() == '__CLASS': row.append(cimclass)
+                        elif rd[0].upper() == '__PATH':
+                            iPath = '%s:%s.' % (cimnamespace, cimclass)
+                            for j in cursor._kbIdx:
+                                prop = klass.properties[j]
+                                ptype=prop.desc.contents.cimtype & CIM_TYPEMASK
+                                value = self._convert(inst.data[j], ptype)
+                                iPath = iPath + str(prop.name)
+                                if ptype == NUMBER:
+                                    iPath = '%s=%s,'%(iPath, value)
+                                else:
+                                    iPath = '%s="%s",'%(iPath, value)
+                            row.append(iPath[:-1])
+                        elif j == -1: row.append(None)
+                        else: row.append(self._convert(inst.data[j], rd[1]))
+                    talloc_free(objs[i])
+                    cursor._rows.append(row)
+                if not cursor._rows: return None
+                cursor.rownumber += 1
+                return cursor._rows.pop(0)
 
-        except WError, e:
-            talloc_free(self._ctx)
-            raise OperationalError, e
-        except Exception, e:
-            talloc_free(self._ctx)
-            raise OperationalError, e
+            except WError, e:
+                raise OperationalError, e
 
+            except Exception, e:
+                raise OperationalError, e
+        finally:
+            objs = None
+            count = None
+            self._lock.release()
 
     def __del__(self):
         self.close()
@@ -568,6 +650,7 @@ class pysambaCnx:
         """
         Close connection to the WMI CIMOM. Implicitly rolls back
         """
+        self._pWS = None
         if self._ctx:
             talloc_free(self._ctx)
         self._ctx = None
@@ -604,14 +687,21 @@ class win32comCnx:
     This class represent an WMI Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._host = kwargs['host']
-        self._cnx = None
+        self._lock = threading.RLock()
+        self._host = kwargs.get('host', None)
+        self._ctx = None
         self._swl = None
+        username = kwargs.get('user', '')
+        if '\\' not in username: username = '.\\' + username
         try:
             self._swl = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-            self._cnx = self._swl.ConnectServer(self._host, kwargs['namespace'],
-                                            kwargs['user'], kwargs['password'])
+            self._ctx = self._swl.ConnectServer(self._host,
+                                        kwargs.get('namespace', 'root/cimv2'),
+                                        username,
+                                        kwargs.get('password', ''),
+                                        kwargs.get('locale', 'MS_409'))
         except Exception, e:
+            self.close()
             raise InterfaceError, e
 
     def _convert(self, value, typeval):
@@ -630,35 +720,60 @@ class win32comCnx:
             return datetime.datetime(*tt[:7]) - td
         return value
 
-    def _execute(self, query):
+    def _execute(self, cursor, query):
         """
         Execute WQL query and fetch first row
         """
+        if self._ctx is None:
+            raise InterfaceError, "Connection closed."
+        self._lock.acquire()
         try:
-            props, classname, kbs = WQLPAT.match(query).groups('')
-            objSet = self._cnx.ExecQuery(query)
-            typedict = {}
-            maxlen = {}
-            for prop in objSet[0].Properties_:
-                typedict[prop.Name] = prop.CIMTYPE
-            if '*' in props:
-                props = typedict.keys()
-                props.append('__path')
-            else:
-                props = props.replace(' ','').split(',')
-            descr = tuple([(pname, typedict.get(pname, CIM_STRING),
-                            maxlen.get(pname, None), maxlen.get(pname, None),
-                            None, None, None) for pname in props])
-            rows = []
-            for ob in objSet:
-                pdict = dict([(p.Name, self._convert(p.Value, p.CIMTYPE)) \
-                                                    for p in ob.Properties_])
-                pdict['__path'] = ob.Path_.Path.split(':')[1]
-                rows.append(tuple([pdict.get(pname, None) for pname in props]))
-            return descr, rows
+            try:
+                props, classname, kbs = WQLPAT.match(query).groups('')
+                del cursor._rows[:]
+                del cursor._pIdx[:]
+                typedict = {}
+                maxlen = {}
+                objSet = self._ctx.ExecQuery(query)
+                for prop in objSet[0].Properties_:
+                    typedict[prop.Name] = prop.CIMTYPE
+                if '*' in props:
+                    props = typedict.keys()
+                    props.extend(['__PATH','__CLASS','__NAMESPACE'])
+                else:
+                    props = props.replace(' ','').split(',')
+                cursor.description = tuple([(pn,typedict.get(pn, CIM_STRING),
+                                    maxlen.get(pn, None), maxlen.get(pn, None),
+                                    None, None, None) for pn in props])
+                props = map(lambda v: str(v).upper(), props)
+                for ob in objSet:
+                    ns = ob.Path_.Namespace.replace('\\','/')
+                    pdict = {'__NAMESPACE': ns,
+                             '__CLASS': ob.Path_.Class,
+                             '__PATH': '%s:%s'%(ns, ob.Path_.RelPath),
+                            }
+                    for p in ob.Properties_:
+                        pName = p.Name.upper()
+                        if pName not in props: continue
+                        pdict[pName] = self._convert(p.Value, p.CIMTYPE)
+                    row = tuple([pdict.get(pn.upper(), None) for pn in props])
+                    cursor._rows.append(row)
+            except Exception, e:
+                raise OperationalError, e
+        finally:
+            self._lock.release()
 
-        except Exception, e:
-            raise OperationalError, e
+
+    def _fetchone(self, cursor):
+        """
+        Execute WQL query and fetch first row
+        """
+        if self._ctx is None:
+            raise InterfaceError, "Connection closed."
+        if cursor._rows:
+            cursor.rownumber += 1
+            return cursor._rows.pop(0)
+        else: return None
 
 
     def __del__(self):
@@ -668,7 +783,8 @@ class win32comCnx:
         """
         Close connection to the WMI CIMOM. Implicitly rolls back
         """
-        self._cnx = None
+        self._ctx = None
+        self._swl = None
 
     def commit(self):
         """
@@ -694,6 +810,7 @@ class win32comCnx:
         Turn autocommit ON or OFF.
         """
         return
+
 
 # connects to a WMI CIMOM
 def Connect(*args, **kwargs):
@@ -726,6 +843,6 @@ __all__ = [ 'BINARY', 'Binary', 'Connect', 'Connection', 'DATE',
     'Date', 'Time', 'Timestamp', 'DateFromTicks', 'TimeFromTicks',
     'TimestampFromTicks', 'DataError', 'DatabaseError', 'Error',
     'FIELD_TYPE', 'IntegrityError', 'InterfaceError', 'InternalError',
-    'MySQLError', 'NULL', 'NUMBER', 'NotSupportedError', 'DBAPITypeObject',
+    'NULL', 'NUMBER', 'NotSupportedError', 'DBAPITypeObject',
     'OperationalError', 'ProgrammingError', 'ROWID', 'STRING', 'TIME',
     'TIMESTAMP', 'Warning', 'apilevel', 'connect', 'paramstyle','threadsafety']

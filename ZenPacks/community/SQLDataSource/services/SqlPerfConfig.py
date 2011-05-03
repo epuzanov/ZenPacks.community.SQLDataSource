@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 1.3 2011/03/15 18:28:02 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.0 2011/05/03 22:40:34 egor Exp $"""
 
-__version__ = "$Revision: 1.3 $"[11:-2]
+__version__ = "$Revision: 2.0 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -36,6 +36,7 @@ class SqlPerfConfig(CollectorConfigService):
         # located at dmd.Monitors.Performance._getOb('localhost').
         # TODO: create a zProperty that allows for individual device schedules
         proxy.configCycleInterval = self._prefs.perfsnmpCycleInterval
+        qIdx = {}
         queries = {}
         datapoints = {}
         threshs = {}
@@ -57,15 +58,14 @@ class SqlPerfConfig(CollectorConfigService):
                     for dp in ds.getRRDDataPoints():
                         dpname = dp.name()
                         dpnames[dpname] = cs
-                        alias = dp.id.strip()
-                        expr = None
-                        for alias in dp.aliases():
+                        alias = (dp.aliases() or [dp])[0]
+                        aname = alias.id.strip().upper()
+                        if hasattr(alias, 'formula'):
                             expr = talesEval("string:%s"%alias.formula, comp,
                                                         extra={'now':'now'})
-                            alias = alias.id.strip()
-                            break
-                        if alias not in columns: columns[alias] = []
-                        columns[alias].append(dp.id)
+                        else: expr = None
+                        if aname not in columns: columns[aname] = []
+                        columns[aname].append(dp.id)
                         datapoints[cs].append((tn, dp.id,
                                 isinstance(comp, Device) and "" or comp.id,
                                 expr,
@@ -82,6 +82,7 @@ class SqlPerfConfig(CollectorConfigService):
                         if cs not in threshs: threshs[cs] = []
                         threshs[cs].append(thrld.createThresholdInstance(comp))
                         break
+
         proxy.queries = queries
         proxy.datapoints = datapoints
         proxy.thresholds = threshs

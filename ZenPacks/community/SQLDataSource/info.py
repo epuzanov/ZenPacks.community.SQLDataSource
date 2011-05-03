@@ -50,5 +50,3 @@ class SQLDataSourceInfo(InfoBase):
         We can NOT test this datsource against a specific device
         """
         return True
-
-
