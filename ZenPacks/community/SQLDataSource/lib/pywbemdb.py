@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 try:
     import pywbem
@@ -406,7 +406,7 @@ class pywbemCnx:
         self._lock.acquire()
         try:
             try:
-                cl = self._cnx.GetClass(classname)
+                cl = self._cnx.GetClass(classname, LocalOnly=False)
                 if '*' in props:
                     props = cl.properties.keys()
                     props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
