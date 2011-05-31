@@ -20,18 +20,54 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.1.1'
+__version__ = '2.0.0'
 
-try:
-    import pywbem
-except:
-    raise StandardError, "Can't import pywbem module. Please, install pywbem first."
-
+from xml.sax import handler, make_parser
+import urllib2, base64
+from datetime import datetime, timedelta
 import threading
-import datetime
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
+DTPAT = re.compile(r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+|-]\d{3})')
+TDPAT = re.compile(r'^(\d{8})(\d{2})(\d{2})(\d{2})\.(\d{6})')
+
+
+XML_REQ = """<CIM CIMVERSION="2.0" DTDVERSION="2.0">
+<MESSAGE ID="1001" PROTOCOLVERSION="1.0">
+<SIMPLEREQ>
+<IMETHODCALL NAME="%s">
+<LOCALNAMESPACEPATH>
+<NAMESPACE NAME="%s"/>
+</LOCALNAMESPACEPATH>%s
+</IMETHODCALL>
+</SIMPLEREQ>
+</MESSAGE>
+</CIM>"""
+EXECQUERY_IPARAM = """
+<IPARAMVALUE NAME="Query">
+<VALUE>%s</VALUE>
+</IPARAMVALUE>
+<IPARAMVALUE NAME="QueryLanguage">
+<VALUE>%s</VALUE>
+</IPARAMVALUE>"""
+CLNAME_IPARAM = """
+<IPARAMVALUE NAME="ClassName">
+<CLASSNAME NAME="%s"/>
+</IPARAMVALUE>"""
+QUALS_IPARAM = """
+<IPARAMVALUE NAME="IncludeQualifiers">
+<VALUE>%s</VALUE>
+</IPARAMVALUE>
+<IPARAMVALUE NAME="LocalOnly">
+<VALUE>FALSE</VALUE>
+</IPARAMVALUE>"""
+PL_IPARAM = """
+<IPARAMVALUE NAME="PropertyList">
+<VALUE.ARRAY>
+<VALUE>%s</VALUE>
+</VALUE.ARRAY>
+</IPARAMVALUE>"""
 
 CIM_EMPTY=0
 CIM_SINT8=16
@@ -104,21 +140,21 @@ def DateFromTicks(ticks):
     This function constructs an object holding a date value from the given
     ticks value.
     """
-    return Date(*datetime.datetime.fromtimestamp(ticks).timetuple()[:3])
+    return Date(*datetime.fromtimestamp(ticks).timetuple()[:3])
 
 def TimeFromTicks(ticks):
     """
     This function constructs an object holding a time value from the given
     ticks value.
     """
-    return Time(*datetime.datetime.fromtimestamp(ticks).timetuple()[3:6])
+    return Time(*datetime.fromtimestamp(ticks).timetuple()[3:6])
 
 def TimestampFromTicks(ticks):
     """
     This function constructs an object holding a time stamp value from the
     given ticks value.
     """
-    return Timestamp(*datetime.datetime.fromtimestamp(ticks).timetuple()[:6])
+    return Timestamp(*datetime.fromtimestamp(ticks).timetuple()[:6])
 
 def Binary(string):
     """
@@ -187,6 +223,152 @@ class NotSupportedError(DatabaseError):
     pass
 
 
+### xml.sax content handler
+
+class CIMHandler(handler.ContentHandler):
+
+    def __init__(self, cursor):
+        handler.ContentHandler.__init__(self)
+        self._in=['IRETURNVALUE','IMETHODRESPONSE','SIMPLERSP','MESSAGE','CIM']
+        self._cur = cursor
+        self._qName = ''
+        self._pName = ''
+        self._pType = ''
+        self._pVal = None
+        self._pdict = {}
+        self._kbs = []
+        self._maxlen = {}
+
+    def _datetime(self, dtarg):
+        """
+        Convert string to datetime.
+        """
+        s = DTPAT.match(dtarg)
+        if s is not None:
+            tt = map(int, s.groups(0))
+            return datetime(*tt[:7]) - timedelta(minutes=tt[7])
+        s = TDPAT.match(dtarg)
+        if s is None: return str(dtarg)
+        return timedelta(**dict(zip(('days','hours','minutes','microseconds'),
+                                                        map(int, s.groups(0)))))
+
+    def _parseType(self, ptype):
+        """
+        Return type number and convert function.
+        """
+        return {
+            'uint8': (CIM_UINT8, int),
+            'uint16': (CIM_UINT16, int),
+            'uint32': (CIM_UINT32, int),
+            'uint64': (CIM_UINT64, long),
+            'sint8': (CIM_SINT8, int),
+            'sint16': (CIM_SINT16, int),
+            'sint32': (CIM_SINT32, int),
+            'sint64': (CIM_SINT64, long),
+            'real32': (CIM_REAL32, float),
+            'real64': (CIM_REAL64, float),
+            'string': (CIM_STRING, str),
+            'char16': (CIM_CHAR16, str),
+            'object': (CIM_OBJECT, str),
+            'reference': (CIM_REFERENCE, str),
+            'boolean': (CIM_BOOLEAN, (lambda val: val.lower() is 'true')),
+            'datetime': (CIM_DATETIME, self._datetime),
+        }.get(ptype, (CIM_STRING, str))
+
+    def startElement(self, name, attrs):
+        if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
+            'VALUE'): return
+        if self._in:
+            tag = self._in.pop()
+            if name == tag:
+                if name != 'IMETHODRESPONSE' or str(attrs._attrs.get('NAME',
+                                        '')) == self._cur._methodname: return
+                raise InterfaceError(0, 'Expecting attribute NAME=%s, got %s'%(
+                    self._cur._methodname, str(attrs._attrs.get('NAME', ''))))
+            elif name == 'ERROR':
+                errcode = int(attrs._attrs.get('CODE', 0))
+                raise InterfaceError(errcode, attrs._attrs.get('DESCRIPTION',
+                            'Error code %s'%errcode))
+            else:
+                raise InterfaceError(0,'Expecting %s element, got %s'%(tag,name))
+#        elif name == 'QUALIFIER':
+#            self._qName = str(attrs._attrs.get('NAME', ''))
+        elif name == 'PROPERTY':
+            self._pName = str(attrs._attrs.get('NAME', ''))
+            self._pType = str(attrs._attrs.get('TYPE', 'string'))
+            self._pVal = None
+            if type(self._cur.description) is tuple: return
+            self._cur.description.append((self._pName,
+                self._parseType(self._pType)[0], None, None, None, None, None))
+        elif name == 'PROPERTY.ARRAY':
+            self._pName = str(attrs._attrs.get('NAME', ''))
+            self._pType = str(attrs._attrs.get('TYPE', 'string'))
+            self._pVal = []
+            if type(self._cur.description) is tuple: return
+            self._cur.description.append((self._pName,
+                0x2000|self._parseType(self._pType)[0],None,None,None,None,None))
+        elif name == 'KEYVALUE':
+            self._pType = str(attrs._attrs.get('VALUETYPE', 'string'))
+        elif name == 'KEYBINDING':
+            self._pName = str(attrs._attrs.get('NAME', ''))
+        elif name == 'INSTANCE':
+            if not self._cur.description: self._cur.description = []
+        elif name == 'INSTANCENAME':
+            self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
+            self._pdict['__NAMESPACE'] = self._cur.connection._namespace
+
+
+    def characters(self, content):
+        if not content.strip(): return
+        if content == 'NULL': val = None
+        else:
+            try: val = self._parseType(self._pType)[1](content)
+            except ValueError: val = unicode(content)
+        if type(self._pVal) is list: self._pVal.append(val)
+        else: self._pVal = val
+
+
+    def endElement(self, name):
+        if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
+            'VALUE', 'KEYVALUE'): return
+#        if name == 'QUALIFIER':
+#            if self._qName == 'Key' and self._pVal.upper() == 'TRUE':
+#                self._cur._keybindings[self._pName] = self._pType
+#            elif self._qName == 'MaxLen':
+#                self._maxlen[self._pName] = int(self._pVal)
+        if name == 'PROPERTY':
+            self._pdict[self._pName.upper()] = self._pVal
+        elif name == 'PROPERTY.ARRAY':
+            self._pdict[self._pName.upper()] = self._pVal
+            self._pVal = None
+        elif name == 'KEYBINDING':
+            if self._pType == 'string':
+                self._kbs.append('%s="%s"'%(self._pName, self._pVal))
+            else:
+                self._kbs.append('%s=%s'%(self._pName, self._pVal))
+        elif name == 'INSTANCE':
+            if type(self._cur.description) is list:
+                if self._cur._props:
+                    pDct=dict([(p[0].upper(),p) for p in self._cur.description])
+                    self._cur.description = [pDct.get(p.upper(), (p, CIM_STRING,
+                        None,None,None,None,None)) for p in self._cur._props]
+                else:self._cur.description.extend([(p,CIM_STRING,None,None,None,
+                    None,None) for p in ['__CLASS', '__NAMESPACE', '__PATH']])
+                self._cur.description = tuple(self._cur.description)
+            for pname, kbval in self._cur._keybindings.iteritems():
+                pval = self._pdict.get(pname.upper(), '')
+                if kbval == pval: continue
+                self._pdict.clear()
+                return
+            self._cur._rows.append(tuple([self._pdict.get(
+                        p[0].upper(), None) for p in self._cur.description]))
+            self._pdict.clear()
+        elif name == 'INSTANCENAME':
+            self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
+                                            ','.join(self._kbs))
+            del self._kbs[:]
+
+
 ### cursor object
 
 class wbemCursor(object):
@@ -204,6 +386,11 @@ class wbemCursor(object):
         self.rownumber = -1
         self.arraysize = 1
         self._rows = []
+        self._props = []
+        self._keybindings = {}
+        self._methodname = ''
+        self._parser = make_parser()
+        self._parser.setContentHandler(CIMHandler(self))
 
     @property
     def rowcount(self):
@@ -229,6 +416,7 @@ class wbemCursor(object):
         """
         self.description = None
         self.connection = None
+        self._parser = None
 
     def execute(self, operation, *args):
         """
@@ -345,118 +533,92 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._host = kwargs.get('host', 'localhost')
-        url = '%s://%s:%s'%(kwargs.get('scheme', 'https'), self._host,
-                                                int(kwargs.get('port', 5989)))
-        self._cnx = pywbem.WBEMConnection(url,
-                        (kwargs.get('user', ''), kwargs.get('password', '')),
-                        default_namespace=kwargs.get('namespace', 'root/cimv2'))
         self._lock = threading.RLock()
+        self._host = kwargs.get('host', 'localhost')
+        self._creds = (kwargs.get('user', ''), kwargs.get('password', ''))
+        self._scheme = kwargs.get('scheme', 'https')
+        self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
+        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._x509 = kwargs.get('x509', {})
+        self._dialect = kwargs.get('dialect', '').upper()
+        self._url='%s://%s:%s/cimom'%(self._scheme,self._host,self._port)
 
-    def _convert(self, value, is_array):
+    def _wbem_request(self, methodname, data):
+        """Send XML data over HTTP to the specified url. Return the
+        response in XML.  Uses Python's build-in urllib2.
         """
-        Convert CIM types to Python standard types.
-        """
-        if not value or value == 'NULL': return None
-        if is_array:
-            return [self._convert(v, None) for v in value]
-        if isinstance(value, pywbem.Uint8): return int(value)
-        if isinstance(value, pywbem.Uint16): return int(value)
-        if isinstance(value, pywbem.Uint32): return int(value)
-        if isinstance(value, pywbem.Uint64): return long(value)
-        if isinstance(value, pywbem.Sint8): return int(value)
-        if isinstance(value, pywbem.Sint16): return int(value)
-        if isinstance(value, pywbem.Sint32): return int(value)
-        if isinstance(value, pywbem.Sint64): return long(value)
-        if isinstance(value, pywbem.Real32): return float(value)
-        if isinstance(value, pywbem.Real64): return float(value)
-        if isinstance(value, pywbem.CIMDateTime):
-            return datetime.datetime(*value.datetime.utctimetuple()[:7])
-        return value
+
+        data = '<?xml version="1.0" encoding="utf-8" ?>\n%s'%data
+
+        headers = { 'Content-type': 'application/xml; charset="utf-8"',
+                    'Content-length': len(data),
+                    'CIMOperation': 'MethodCall',
+                    'CIMMethod': methodname,
+                    'CIMObject': self._namespace}
+
+        if self._creds[0] is not '': 
+            headers['Authorization'] = 'Basic %s'%base64.encodestring(
+                                        '%s:%s'%self._creds).replace('\n', '')
+
+        request = urllib2.Request(self._url, data, headers)
+
+        tryLimit = 5
+        while tryLimit:
+            tryLimit -= 1
+            try:
+                xml_repl = urllib2.urlopen(request)
+                return xml_repl
+            except urllib2.HTTPError, arg:
+                raise InterfaceError('HTTP error: %s' % arg.code)
+            except urllib2.URLError, arg:
+                if arg.reason[0] in [32, 104]: continue
+                raise InterfaceError('socket error: %s' % arg.reason)
+        if hasattr(arg, reason):
+            raise InterfaceError('socket error: %s' % arg.reason)
+        else:
+            raise InterfaceError('HTTP error: %s' % arg.code)
 
 
-    def _parseType(self, ptype, is_array):
-        """
-        Convert CIM types string to CIMTYPE value.
-        """
-        return (is_array and CIM_FLAG_ARRAY or 0)|{'sint16':CIM_SINT16,
-                'sint32':CIM_SINT32, 'real32':CIM_REAL32, 'real64':CIM_REAL64,
-                'string': CIM_STRING, 'boolean':CIM_BOOLEAN,'object':CIM_OBJECT,
-                'sint8':CIM_SINT8, 'uint8':CIM_UINT8, 'uint16':CIM_UINT16,
-                'uint32':CIM_UINT32, 'sint64':CIM_SINT64, 'uint64':CIM_UINT64,
-                'datetime':CIM_DATETIME, 'reference':CIM_REFERENCE,
-                'char16':CIM_CHAR16}.get(ptype, 0)
-
-
-    def _execute(self, cursor, operation):
+    def _execute(self, cursor, query):
         """
         Execute Query
         """
-        if self._cnx is None:
-            raise InterfaceError, "Connection closed."
         try:
-            props, classname, kbs = WQLPAT.match(operation).groups('')
+            props, classname, where = WQLPAT.match(query).groups('')
         except:
-            raise ProgrammingError, "Syntax error in the WQL statement."
-        kwargs = {"IncludeQualifiers":False, "LocalOnly":False}
-        if props != '*':
-            plist = [p for p in set(props.replace(' ', '').split(',')) \
-                        if p.upper() not in ['__PATH','__CLASS','__NAMESPACE']]
-            kwargs["PropertyList"] = list(plist)
+            raise ProgrammingError, "Syntax error in the query statement."
+        if props == '*': cursor._props = []
+        else:cursor._props=[p for p in set(props.replace(' ','').split(','))]
+        cursor._keybindings.clear()
         self._lock.acquire()
         try:
             try:
-                cl = self._cnx.GetClass(classname, LocalOnly=False)
-                if '*' in props:
-                    props = cl.properties.keys()
-                    props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
+                if self._dialect:
+                    method = 'ExecQuery'
+                    cursor._methodname = method
+                    xml_repl = self._wbem_request(method, XML_REQ%(method,
+                        '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
+                        ), EXECQUERY_IPARAM%(query, self._dialect)))
                 else:
-                    props = props.replace(' ','').split(',')
-                descr = []
-                for pname in props:
-                    prop = cl.properties.get(pname, None)
-                    if prop:
-                        ptype = self._parseType(prop.type, prop.is_array)
-                        maxlen = getattr(prop.qualifiers.get('MaxLen', None),
-                                                                'value', None)
-                    else:
-                        ptype = CIM_STRING
-                        maxlen = None
-                    descr.append((pname,ptype,maxlen,maxlen,None,None,None))
-                cursor.description = tuple(descr)
-                if kbs:
-                    try:
-                        kbs = eval('(lambda **kwargs:kwargs)(%s)'%ANDPAT.sub(
-                                                                    ',', kbs))
-                        instancename = pywbem.CIMInstanceName(classname, kbs)
-                        results = [self._cnx.GetInstance(instancename,**kwargs)]
-                    except SyntaxError:
-                        results=self._cnx.EnumerateInstances(classname,**kwargs)
-                else:
-                    results = self._cnx.EnumerateInstances(classname, **kwargs)
-                while results:
-                    ob = results.pop(0)
-                    row = []
-                    for col in cursor.description:
-                        prop = ob.properties.get(col[0], None)
-                        if prop:
-                            row.append(self._convert(prop.value, prop.is_array))
-                        elif col[0].upper() == '__NAMESPACE':
-                            row.append(str(ob.path).split(':')[0])
-                        elif col[0].upper() == '__CLASS':
-                            row.append(str(ob.classname))
-                        elif col[0].upper() == '__PATH': row.append(str(ob.path))
-                        else: row.append(None)
-                    cursor._rows.append(tuple(row))
-                    ob = None
-
-            except IndexError, e:
-                raise OperationalError, "No data available."
-            except pywbem.CIMError, e:
+                    if where:
+                        try: cursor._keybindings.update(
+                            eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
+                            )
+                        except: raise OperationalError('Unsupported syntax.')
+                    method = 'EnumerateInstances'
+                    cursor._methodname = method
+                    pLst = [p for p in cursor._props \
+                        if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
+                    xml_repl = self._wbem_request(method, XML_REQ%(method,
+                        '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
+                        ),''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
+                        pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')
+                        )))
+                cursor._parser.parse(xml_repl)
+            except InterfaceError, e:
                 raise InterfaceError, e
-            except pywbem.cim_http.AuthError:
-                self.close()
-                raise InterfaceError, "Bad credentials."
+            except OperationalError, e:
+                raise OperationalError, e
             except Exception, e:
                 raise OperationalError, e
         finally:
@@ -477,7 +639,7 @@ class pywbemCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        self._cnx = None
+        return
 
     def commit(self):
         """
@@ -517,6 +679,7 @@ def Connect(*args, **kwargs):
     password      user's password
     host          host name
     namespace     namespace
+    dialect       query dialect
 
     Examples:
     con  =  pywbemdb.connect(scheme='https',
@@ -525,6 +688,7 @@ def Connect(*args, **kwargs):
                             password='P@ssw0rd'
                             host='localhost',
                             namespace='root/cimv2',
+                            dialect='CQL'
                             )
     """
 
