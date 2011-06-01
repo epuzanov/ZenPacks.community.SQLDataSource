@@ -13,15 +13,17 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.0 2011/05/03 22:30:38 egor Exp $"""
+$Id: SQLDataSource.py,v 2.1 2011/06/01 23:49:36 egor Exp $"""
 
-__version__ = "$Revision: 2.0 $"[11:-2]
+__version__ = "$Revision: 2.1 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
 from Products.ZenUtils.Utils import executeStreamCommand
 from Products.ZenWidgets import messaging
 from AccessControl import ClassSecurityInfo, Permissions
+from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
+from twisted.python.failure import Failure
 
 import cgi
 import time
@@ -104,7 +106,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         else: where_e = len(sql)
         try:
             where = re.compile(' AND ', re.I).sub(',', sql[where_s:where_e])
-            kbs = eval('(lambda **kws:kws)(%s)'%where.encode('string-escape'))
+            kbs = eval('(lambda **kws:kws)(%s)'%where) #.encode('string-escape'))
             FROMPAT = re.compile('[%s]\]?(\s+)FROM\s'%'|'.join(
                                     [(dp.getAliasNames() or [dp.id])[0] \
                                     for dp in self.getRRDDataPoints()]), re.I)
@@ -124,7 +126,8 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
     def getQueryInfo(self, context):
         try:
             sql = self.getCommand(context, self.sql)
-            sqlp, kbs = self.parseSqlQuery(sql)
+            try: sqlp, kbs = self.parseSqlQuery(sql)
+            except: sqlp, kbs = sql, {}
             return sql, sqlp, kbs, self.getConnectionString(context)
         except: return '', '', {}, ''
 
@@ -191,7 +194,6 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
 
         start = time.time()
         try:
-            from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
             sql, sqlp, kbs, cs = self.getQueryInfo(device)
             if not sql: raise StandardError('query is empty')
             sql = sql.replace('$','\\$')
@@ -201,8 +203,9 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             write('Executing query: "%s"'%sql)
             write('')
             cl = SQLClient()
-            rows = cl.syncQuery({'t':(sql, kbs, cs, properties)}).get('t', [{}])
+            rows = cl.syncQuery({'t':(sql, {}, cs, properties)}).get('t', [{}])
             cl = None
+            if isinstance(rows[0], Failure): raise rows[0]
             write('|'.join(rows[0].keys()))
             for row in rows:
                 write('|'.join(map(str, row.values())))

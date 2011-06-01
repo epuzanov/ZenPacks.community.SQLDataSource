@@ -20,10 +20,10 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.0'
+__version__ = '2.0.1'
 
 from xml.sax import handler, make_parser
-import urllib2, base64
+import httplib, urllib2
 from datetime import datetime, timedelta
 import threading
 import re
@@ -369,6 +369,19 @@ class CIMHandler(handler.ContentHandler):
             del self._kbs[:]
 
 
+### HTTPSClientAuthHandler object
+
+class HTTPSClientAuthHandler(urllib2.HTTPSHandler):
+    def __init__(self, key, cert):
+        urllib2.HTTPSHandler.__init__(self)
+        self.key = key
+        self.cert = cert
+    def https_open(self, req):
+        return self.do_open(self.getConnection, req)
+    def getConnection(self, host):
+        return httplib.HTTPSConnection(host, key_file=self.key, cert_file=self.cert)
+
+
 ### cursor object
 
 class wbemCursor(object):
@@ -535,13 +548,24 @@ class pywbemCnx:
     def __init__(self, *args, **kwargs):
         self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
-        self._creds = (kwargs.get('user', ''), kwargs.get('password', ''))
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
         self._namespace = kwargs.get('namespace', 'root/cimv2')
-        self._x509 = kwargs.get('x509', {})
         self._dialect = kwargs.get('dialect', '').upper()
         self._url='%s://%s:%s/cimom'%(self._scheme,self._host,self._port)
+        self._urlOpener = urllib2.build_opener()
+        uname = kwargs.get('user', '')
+        if uname:
+            passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
+            passman.add_password(None,self._url,uname,kwargs.get('password',''))
+            authhandler = urllib2.HTTPBasicAuthHandler(passman)
+            self._urlOpener.add_handler(authhandler)
+        key_file = kwargs.get('key_file', '')
+        cert_file = kwargs.get('cert_file', '')
+        if key_file and cert_file:
+            sslauthhandler = HTTPSClientAuthHandler(key_file, cert_file)
+            self._urlOpener.add_handler(sslauthhandler)
+            
 
     def _wbem_request(self, methodname, data):
         """Send XML data over HTTP to the specified url. Return the
@@ -556,17 +580,13 @@ class pywbemCnx:
                     'CIMMethod': methodname,
                     'CIMObject': self._namespace}
 
-        if self._creds[0] is not '': 
-            headers['Authorization'] = 'Basic %s'%base64.encodestring(
-                                        '%s:%s'%self._creds).replace('\n', '')
-
         request = urllib2.Request(self._url, data, headers)
 
         tryLimit = 5
         while tryLimit:
             tryLimit -= 1
             try:
-                xml_repl = urllib2.urlopen(request)
+                xml_repl = self._urlOpener.open(request)
                 return xml_repl
             except urllib2.HTTPError, arg:
                 raise InterfaceError('HTTP error: %s' % arg.code)
@@ -680,6 +700,8 @@ def Connect(*args, **kwargs):
     host          host name
     namespace     namespace
     dialect       query dialect
+    key_file      key file for Certificate based Authorization
+    cert_file     cert file for Certificate based Authorization
 
     Examples:
     con  =  pywbemdb.connect(scheme='https',
