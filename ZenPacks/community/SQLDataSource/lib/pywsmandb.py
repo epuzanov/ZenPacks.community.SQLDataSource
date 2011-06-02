@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.1'
+__version__ = '2.0.2'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -116,21 +116,14 @@ CIM_ARR_CHAR16=CIM_FLAG_ARRAY|CIM_CHAR16
 CIM_ARR_OBJECT=CIM_FLAG_ARRAY|CIM_OBJECT
 CIM_ILLEGAL=0xfff
 CIM_TYPEMASK=0x2FFF
-TYPEDICT = {'sint16':CIM_SINT16,
-    'sint32':CIM_SINT32, 'real32':CIM_REAL32, 'real64':CIM_REAL64,
-    'string': CIM_STRING, 'boolean':CIM_BOOLEAN,'object':CIM_OBJECT,
-    'sint8':CIM_SINT8, 'uint8':CIM_UINT8, 'uint16':CIM_UINT16,
-    'uint32':CIM_UINT32, 'sint64':CIM_SINT64, 'uint64':CIM_UINT64,
-    'datetime':CIM_DATETIME, 'reference':CIM_REFERENCE,
-    'char16':CIM_CHAR16, 'arr_sint16':CIM_ARR_SINT16,
-    'arr_sint32':CIM_ARR_SINT32, 'arr_real32':CIM_ARR_REAL32,
-    'arr_real64':CIM_ARR_REAL64, 'arr_string': CIM_ARR_STRING,
-    'arr_boolean':CIM_ARR_BOOLEAN,'arr_object':CIM_ARR_OBJECT,
-    'arr_sint8':CIM_ARR_SINT8, 'arr_uint8':CIM_ARR_UINT8,
-    'arr_uint16':CIM_ARR_UINT16, 'arr_uint32':CIM_ARR_UINT32,
-    'arr_sint64':CIM_ARR_SINT64, 'arr_uint64':CIM_ARR_UINT64,
-    'arr_char16':CIM_ARR_CHAR16, 'arr_datetime':CIM_ARR_DATETIME,
-    'arr_reference':CIM_ARR_REFERENCE}
+TYPEDICT = {'sint8':CIM_SINT8, 'uint8':CIM_UINT8, 
+            'sint16':CIM_SINT16, 'uint16':CIM_UINT16,
+            'sint32':CIM_SINT32, 'uint32':CIM_UINT32,
+            'sint64':CIM_SINT64, 'uint64':CIM_UINT64,
+            'real32':CIM_REAL32, 'real64':CIM_REAL64,
+            'string': CIM_STRING, 'char16':CIM_CHAR16,
+            'boolean':CIM_BOOLEAN, 'datetime':CIM_DATETIME,
+            'object':CIM_OBJECT, 'reference':CIM_REFERENCE}
 
 
 class DBAPITypeObject:
@@ -329,7 +322,7 @@ class WSMHandler(handler.ContentHandler):
 
 
     def characters(self, content):
-        if content.strip(): self._pVal = unicode(content)
+        if content.strip(): self._pVal = str(content)
 
 
     def endElementNS(self, name, qname):
@@ -409,8 +402,9 @@ class intrHandler(handler.ContentHandler):
         if not self._tag: return
         if self._tag == 'p':
             if name == 'name': self._pName = self._tVal
-            elif name == 'array': self._tVal = 'arr_%s'%self._tVal
-            elif name == 'type':
+            elif name == 'array':
+                self._pType = CIM_FLAG_ARRAY|TYPEDICT.get(self._tVal, 0)
+            elif name == 'type' and self._pType == 0:
                 self._pType = TYPEDICT.get(self._tVal, 0)
             elif name == 'property':
                 self._descr[self._pName.upper()] = (self._pName, self._pType,
@@ -422,7 +416,7 @@ class intrHandler(handler.ContentHandler):
             if name == 'name': self._qName = self._tVal.lower()
             elif name == 'value' and self._qName == 'maxlen':
                 self._maxLen = int(self._tVal)
-            elif name == 'qualifier': self._tag = ''
+            elif name == 'qualifier': self._tag = 'p'
 
     def startDocument(self):
         self._descr = {'__PATH': ('__PATH',CIM_STRING,None,None,None,None,None),
@@ -432,8 +426,8 @@ class intrHandler(handler.ContentHandler):
 
     def endDocument(self): 
         if not self._cur._props: self._cur.description = self._descr.values()
-        self._cur.description = tuple([self._descr.get(p.upper(), (p,CIM_STRING,
-            None, None, None, None, None)) for p in self._cur._props])
+        else: self._cur.description = tuple([self._descr.get(p.upper(), (p,
+            CIM_STRING,None,None,None,None,None)) for p in self._cur._props])
         self._descr = None
 
 
