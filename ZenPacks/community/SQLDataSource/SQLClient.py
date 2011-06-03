@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.0 2011/05/03 22:27:37 egor Exp $"""
+$Id: SQLClient.py,v 2.1 2011/06/03 21:59:04 egor Exp $"""
 
-__version__ = "$Revision: 2.0 $"[11:-2]
+__version__ = "$Revision: 2.1 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -109,7 +109,7 @@ class SQLClient(BaseClient):
         if value.replace('.', '', 1).isdigit(): return float(value)
         if value == 'false': return False
         if value == 'true': return True
-        return value.strip()
+        return value #.strip()
 
 
     def parseResults(self, cursor, resMaps):

@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.2'
+__version__ = '2.0.1'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -529,7 +529,8 @@ class wsmanCursor(object):
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation)
+            self.connection._execute(self, operation.replace('\\',
+                                                '\\\\').replace('\\\\"','\\"'))
 
         except OperationalError, e:
             raise OperationalError, e
@@ -696,9 +697,18 @@ class wsmanCnx:
             props, classname, where = WQLPAT.match(query).groups('')
         except:
             raise ProgrammingError, "Syntax error in the query statement."
+        cursor._selectors.clear()
+        if where:
+            try:
+                cursor._selectors.update(
+                    eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
+                    )
+                if [v for v in cursor._selectors.values() if type(v) is list]:
+                    query = 'SELECT %s FROM %s'%(props, classname)
+                else: cursor._selectors.clear()
+            except: cursor._selectors.clear()
         if props == '*': cursor._props = []
         else:cursor._props=[p for p in set(props.replace(' ','').split(','))]
-        cursor._selectors.clear()
         self._lock.acquire()
         try:
             try:
@@ -757,18 +767,15 @@ class wsmanCnx:
 
 
     def _fetchone(self, cursor):
-        if cursor._rows:
-            cursor.rownumber += 1
-            return cursor._rows.pop(0)
-        if not cursor._enumCtx: return None
         self._lock.acquire()
         try:
             try:
-                xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                    self._url, cursor._uri, uuid.uuid4(), """<wsen:Pull>
+                while not cursor._rows and cursor._enumCtx:
+                    xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
+                        self._url, cursor._uri, uuid.uuid4(), """<wsen:Pull>
 <wsen:EnumerationContext>%s</wsen:EnumerationContext>
 </wsen:Pull>"""%cursor._enumCtx), ENUM_ACTION_PULL)
-                cursor._parser.parse(xml_repl)
+                    cursor._parser.parse(xml_repl)
                 if not cursor._rows: return None
                 cursor.rownumber += 1
                 return cursor._rows.pop(0)

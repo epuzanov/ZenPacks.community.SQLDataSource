@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.1.0'
+__version__ = '1.2.1'
 
 import threading
 import sys 
@@ -28,6 +28,7 @@ import datetime
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
+ANDPAT = re.compile("\s+AND\s+", re.I)
 
 if sys.platform == 'win32':
     try:
@@ -247,6 +248,7 @@ class wmiCursor(object):
         self._kbIdx = []
         self._pIdx = []
         self._rows = []
+        self._kbs = {}
 
     def _check_executed(self):
         if not getattr(self.connection, '_ctx', None):
@@ -264,6 +266,7 @@ class wmiCursor(object):
         del self._kbIdx[:]
         del self._pIdx[:]
         del self._rows[:]
+        self._kbs.clear()
         self._pEnum = None
         self.description = None
 
@@ -293,7 +296,8 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation.encode('string-escape'))
+            self.connection._execute(self, operation.replace('\\',
+                                                '\\\\').replace('\\\\"','\\"'))
             if self.description: self.rownumber = 0
 
         except OperationalError, e:
@@ -392,7 +396,7 @@ class pysambaCnx:
         try:
             library.com_init_ctx(byref(self._ctx), None)
 
-            creds = kwargs.get('user', '') + '%' + kwargs.get('password', '')
+            creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
             cred = library.cli_credentials_init(self._ctx)
             library.cli_credentials_set_conf(cred)
             library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
@@ -489,7 +493,17 @@ class pysambaCnx:
                 del cursor._rows[:]
                 del cursor._kbIdx[:]
                 del cursor._pIdx[:]
-                props, classname, kbs = WQLPAT.match(query).groups('')
+                props, classname, where = WQLPAT.match(query).groups('')
+                cursor._kbs.clear()
+                if where:
+                    try:
+                        cursor._kbs.update(
+                            eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
+                            )
+                        if [v for v in cursor._kbs.values() if type(v) is list]:
+                            query = 'SELECT %s FROM %s'%(props, classname)
+                        else: cursor._kbs.clear()
+                    except: cursor._kbs.clear()
                 props = props.replace(' ','').split(',')
                 if '*' in props: props.remove('*')
                 result = library.IWbemServices_ExecQuery(
@@ -520,35 +534,28 @@ class pysambaCnx:
                 cimclass = getattr(klass, '__CLASS', '')
                 cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
                                             '').replace('\\', '/')
-                iPath = '%s:%s.'%(cimnamespace, cimclass)
+                iPath = ['%s:%s.'%(cimnamespace, cimclass)]
                 for j in range(getattr(klass, '__PROPERTY_COUNT')):
                     prop = klass.properties[j]
                     if not prop.name: continue
                     ptype = prop.desc.contents.cimtype & CIM_TYPEMASK
-                    if ptype == STRING or not props or '__path' in props:
-                        null_ok = None
-                        maxlen = None
-                        for i in range(prop.desc.contents.qualifiers.count):
-                            q = prop.desc.contents.qualifiers.item[i].contents
-                            if q.name in ['key']:
-                                if j in cursor._kbIdx: continue
-                                if self._convert(q.value, q.cimtype):
-                                    cursor._kbIdx.append(j)
-                                    null_ok = False
-                                    value = self._convert(inst.data[j], ptype)
-                                    iPath = iPath + str(prop.name)
-                                    if ptype == NUMBER:
-                                        iPath = '%s=%s,'%(iPath, value)
-                                    else:
-                                        iPath = '%s="%s",'%(iPath, value)
-                            if q.name == 'MaxLen':
-                                maxlen = self._convert(q.value, q.cimtype)
-                        pdict[prop.name] = [prop.name, ptype, maxlen, maxlen,
+                    null_ok = None
+                    maxlen = None
+                    for i in range(prop.desc.contents.qualifiers.count):
+                        q = prop.desc.contents.qualifiers.item[i].contents
+                        if q.name in ['key']:
+                            if j in cursor._kbIdx: continue
+                            if self._convert(q.value, q.cimtype):
+                                cursor._kbIdx.append(j)
+                                null_ok = False
+                                value = self._convert(inst.data[j], ptype)
+                                if ptype != NUMBER:
+                                    value = '"%s"'%value
+                                iPath.append('%s=%s,'%(str(prop.name),value))
+                        if q.name == 'MaxLen':
+                            maxlen = self._convert(q.value, q.cimtype)
+                    pdict[prop.name] = [prop.name, ptype, maxlen, maxlen,
                                                         None, None, null_ok, j]
-                    else:
-                        pdict[prop.name] = [prop.name, ptype, None, None, None,
-                                                                None, None, j]
-                iPath = iPath[:-1]
                 if not props:
                     props = pdict.keys()
                     props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
@@ -559,15 +566,19 @@ class pysambaCnx:
                     pIdx = rDescr.pop()
                     cursor._pIdx.append(pIdx)
                     descr.append(tuple(rDescr))
-                    if pn.upper() == '__NAMESPACE': row.append(cimnamespace)
-                    elif pn.upper() == '__CLASS': row.append(cimclass)
-                    elif pn.upper() == '__PATH': row.append(iPath)
+                    uPn = pn.upper()
+                    if uPn == '__NAMESPACE': row.append(cimnamespace)
+                    elif uPn == '__CLASS': row.append(cimclass)
+                    elif uPn == '__PATH': row.append(''.join(iPath)[:-1])
                     elif pIdx == -1: row.append(None)
                     else: row.append(self._convert(inst.data[pIdx], rDescr[1]))
+                    if pn in cursor._kbs:
+                        if row[-1] != cursor._kbs[pn]: row.pop(-1)
                 cursor.description = tuple(descr)
-                cursor._rows.append(tuple(row))
+                if len(row) == len(descr): cursor._rows.append(tuple(row))
                 talloc_free(objs[0])
                 pdict.clear()
+
 
             except WError, e:
                 raise OperationalError, e
@@ -595,40 +606,44 @@ class pysambaCnx:
             try:
                 objs = (POINTER(WbemClassObject)*self._wmibatchSize)()
                 count = uint32_t()
-                result = library.IEnumWbemClassObject_SmartNext(
-                        cursor._pEnum,
-                        self._ctx,
-                        -1,
-                        self._wmibatchSize,
-                        objs,
-                        byref(count))
-                WERR_CHECK(result, self._host, "Retrieve result data.")
-                for i in range(count.value):
-                    row = []
-                    klass = objs[i].contents.obj_class.contents
-                    inst = objs[i].contents.instance.contents
-                    cimclass = getattr(klass, '__CLASS', '')
-                    cimnamespace = getattr(objs[i].contents, '__NAMESPACE',
-                                            '').replace('\\', '/')
-                    for j, rd in zip(cursor._pIdx, cursor.description):
-                        if rd[0].upper() == '__NAMESPACE': row.append(cimnamespace)
-                        elif rd[0].upper() == '__CLASS': row.append(cimclass)
-                        elif rd[0].upper() == '__PATH':
-                            iPath = '%s:%s.' % (cimnamespace, cimclass)
-                            for j in cursor._kbIdx:
-                                prop = klass.properties[j]
-                                ptype=prop.desc.contents.cimtype & CIM_TYPEMASK
-                                value = self._convert(inst.data[j], ptype)
-                                iPath = iPath + str(prop.name)
-                                if ptype == NUMBER:
-                                    iPath = '%s=%s,'%(iPath, value)
-                                else:
-                                    iPath = '%s="%s",'%(iPath, value)
-                            row.append(iPath[:-1])
-                        elif j == -1: row.append(None)
-                        else: row.append(self._convert(inst.data[j], rd[1]))
-                    talloc_free(objs[i])
-                    cursor._rows.append(row)
+                while cursor._pEnum and not cursor._rows:
+                    result = library.IEnumWbemClassObject_SmartNext(
+                            cursor._pEnum,
+                            self._ctx,
+                            -1,
+                            self._wmibatchSize,
+                            objs,
+                            byref(count))
+                    WERR_CHECK(result, self._host, "Retrieve result data.")
+                    if count.value == 0: cursor._pEnum = None
+                    for i in range(count.value):
+                        row = []
+                        klass = objs[i].contents.obj_class.contents
+                        inst = objs[i].contents.instance.contents
+                        cimclass = getattr(klass, '__CLASS', '')
+                        cimnamespace = getattr(objs[i].contents, '__NAMESPACE',
+                                                        '').replace('\\', '/')
+                        for j, rd in zip(cursor._pIdx, cursor.description):
+                            uName = rd[0].upper()
+                            if uName == '__NAMESPACE': row.append(cimnamespace)
+                            elif uName == '__CLASS':row.append(cimclass)
+                            elif uName == '__PATH':
+                                iPath = ['%s:%s.' % (cimnamespace, cimclass)]
+                                for j in cursor._kbIdx:
+                                    prop = klass.properties[j]
+                                    ptype=prop.desc.contents.cimtype & CIM_TYPEMASK
+                                    value = self._convert(inst.data[j], ptype)
+                                    if ptype != NUMBER:
+                                        value = '"%s"'%value
+                                    iPath.append('%s=%s,'%(str(prop.name),value))
+                                row.append(''.join(iPath)[:-1])
+                            elif j == -1: row.append(None)
+                            else: row.append(self._convert(inst.data[j], rd[1]))
+                            if rd[0] in cursor._kbs:
+                                if row[-1] != cursor._kbs[rd[0]]: row.pop(-1)
+                        talloc_free(objs[i])
+                        if len(row)==len(cursor.description):
+                            cursor._rows.append(tuple(row))
                 if not cursor._rows: return None
                 cursor.rownumber += 1
                 return cursor._rows.pop(0)
@@ -729,7 +744,17 @@ class win32comCnx:
         self._lock.acquire()
         try:
             try:
-                props, classname, kbs = WQLPAT.match(query).groups('')
+                props, classname, where = WQLPAT.match(query).groups('')
+                kbs = {}
+                if where:
+                    try:
+                        kbs.update(
+                            eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
+                            )
+                        if [v for v in kbs.values() if type(v) is list]:
+                            query = 'SELECT %s FROM %s'%(props, classname)
+                        else: kbs = {}
+                    except: kbs = {}
                 del cursor._rows[:]
                 del cursor._pIdx[:]
                 typedict = {}
@@ -756,6 +781,12 @@ class win32comCnx:
                         pName = p.Name.upper()
                         if pName not in props: continue
                         pdict[pName] = self._convert(p.Value, p.CIMTYPE)
+                    for pname, kbval in kbs.iteritems():
+                        pval = pdict.get(pname.upper(), None)
+                        if kbval == pval: continue
+                        pdict.clear()
+                        break
+                    if not pdict: continue
                     row = tuple([pdict.get(pn.upper(), None) for pn in props])
                     cursor._rows.append(row)
             except Exception, e:
