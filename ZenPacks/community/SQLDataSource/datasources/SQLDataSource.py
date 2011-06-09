@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.1 2011/06/01 23:49:36 egor Exp $"""
+$Id: SQLDataSource.py,v 2.2 2011/06/09 20:09:41 egor Exp $"""
 
-__version__ = "$Revision: 2.1 $"[11:-2]
+__version__ = "$Revision: 2.2 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -116,7 +116,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                 sql = re.sub(FROMPAT, lambda m: m.group(0).replace(m.group(1),
                             ',' + ','.join(kbs.keys()) + m.group(1), 1), sql)
         except: return sql, {}
-        return sql, kbs
+        return sql.strip(), kbs
 
 
     def getConnectionString(self, context):

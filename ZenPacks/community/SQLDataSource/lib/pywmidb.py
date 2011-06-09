@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.2.1'
+__version__ = '1.2.2'
 
 import threading
 import sys 
@@ -296,8 +296,8 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation.replace('\\',
-                                                '\\\\').replace('\\\\"','\\"'))
+            self.connection._execute(self, operation.replace('\\', '\\\\'
+                                                    ).replace('\\\\"', '\\"'))
             if self.description: self.rownumber = 0
 
         except OperationalError, e:
@@ -534,7 +534,7 @@ class pysambaCnx:
                 cimclass = getattr(klass, '__CLASS', '')
                 cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
                                             '').replace('\\', '/')
-                iPath = ['%s:%s.'%(cimnamespace, cimclass)]
+                iPath = []
                 for j in range(getattr(klass, '__PROPERTY_COUNT')):
                     prop = klass.properties[j]
                     if not prop.name: continue
@@ -551,7 +551,7 @@ class pysambaCnx:
                                 value = self._convert(inst.data[j], ptype)
                                 if ptype != NUMBER:
                                     value = '"%s"'%value
-                                iPath.append('%s=%s,'%(str(prop.name),value))
+                                iPath.append('%s=%s'%(str(prop.name),value))
                         if q.name == 'MaxLen':
                             maxlen = self._convert(q.value, q.cimtype)
                     pdict[prop.name] = [prop.name, ptype, maxlen, maxlen,
@@ -569,7 +569,8 @@ class pysambaCnx:
                     uPn = pn.upper()
                     if uPn == '__NAMESPACE': row.append(cimnamespace)
                     elif uPn == '__CLASS': row.append(cimclass)
-                    elif uPn == '__PATH': row.append(''.join(iPath)[:-1])
+                    elif uPn == '__PATH':
+                        row.append(cimclass + '.' + ','.join(iPath))
                     elif pIdx == -1: row.append(None)
                     else: row.append(self._convert(inst.data[pIdx], rDescr[1]))
                     if pn in cursor._kbs:
@@ -626,17 +627,17 @@ class pysambaCnx:
                         for j, rd in zip(cursor._pIdx, cursor.description):
                             uName = rd[0].upper()
                             if uName == '__NAMESPACE': row.append(cimnamespace)
-                            elif uName == '__CLASS':row.append(cimclass)
+                            elif uName == '__CLASS': row.append(cimclass)
                             elif uName == '__PATH':
-                                iPath = ['%s:%s.' % (cimnamespace, cimclass)]
+                                iPath = []
                                 for j in cursor._kbIdx:
                                     prop = klass.properties[j]
                                     ptype=prop.desc.contents.cimtype & CIM_TYPEMASK
                                     value = self._convert(inst.data[j], ptype)
                                     if ptype != NUMBER:
                                         value = '"%s"'%value
-                                    iPath.append('%s=%s,'%(str(prop.name),value))
-                                row.append(''.join(iPath)[:-1])
+                                    iPath.append('%s=%s'%(str(prop.name),value))
+                                row.append(cimclass + '.' + ','.join(iPath))
                             elif j == -1: row.append(None)
                             else: row.append(self._convert(inst.data[j], rd[1]))
                             if rd[0] in cursor._kbs:
@@ -775,7 +776,7 @@ class win32comCnx:
                     ns = ob.Path_.Namespace.replace('\\','/')
                     pdict = {'__NAMESPACE': ns,
                              '__CLASS': ob.Path_.Class,
-                             '__PATH': '%s:%s'%(ns, ob.Path_.RelPath),
+                             '__PATH': ob.Path_.RelPath,
                             }
                     for p in ob.Properties_:
                         pName = p.Name.upper()

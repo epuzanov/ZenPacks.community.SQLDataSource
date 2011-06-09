@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.1 2011/06/03 21:59:04 egor Exp $"""
+$Id: SQLClient.py,v 2.2 2011/05/09 20:00:36 egor Exp $"""
 
-__version__ = "$Revision: 2.1 $"[11:-2]
+__version__ = "$Revision: 2.2 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -109,12 +109,18 @@ class SQLClient(BaseClient):
         if value.replace('.', '', 1).isdigit(): return float(value)
         if value == 'false': return False
         if value == 'true': return True
-        return value #.strip()
+        return value.strip()
 
 
     def parseResults(self, cursor, resMaps):
         results = {}
         rows = {}
+        if not cursor.description:
+            for instances in resMaps.values():
+                for tables in instances.values():
+                    for table, props in tables:
+                        results[table] = [{}]
+            return results
         header = [h[0].upper() for h in cursor.description]
         for row in (hasattr(cursor,'__iter__') and cursor or cursor.fetchall()):
             rDict = dict(zip(header, [self.parseValue(v) for v in row]))
@@ -165,17 +171,17 @@ class SQLClient(BaseClient):
                 sql, sqlp, kbs, cs, columns = task
             table = (tn, columns)
             ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
-            ival = tuple([str(v).upper() for v in (kbs or {}).values()])
+            ival = tuple([str(v).strip().upper() for v in (kbs or {}).values()])
             if cs not in queries:
                 queries[cs] = {}
                 qIdx[cs] = {}
             if sqlp not in queries[cs]:
                 if sqlp in qIdx[cs]:
-                    queries[cs][sqlp] = queries[cs][qIdx[cs][sqlp]]
-                    del queries[cs][qIdx[cs][sqlp]]
+                    queries[cs][sqlp] = qIdx[cs][sqlp][1]
+                    del queries[cs][qIdx[cs][sqlp][0]]
                 else:
-                    qIdx[cs][sqlp] = sql
-                    queries[cs][sql]={ikey:{ival:[table]}}
+                    qIdx[cs][sqlp] = (sql, {ikey:{ival:[table]}})
+                    queries[cs][sql]={():{():[table]}}
                     continue
             if ikey not in queries[cs][sqlp]:
                 queries[cs][sqlp][ikey] = {ival:[table]}
@@ -183,6 +189,7 @@ class SQLClient(BaseClient):
                 queries[cs][sqlp][ikey][ival] = [table]
             else:
                 queries[cs][sqlp][ikey][ival].append(table)
+        qIdx = None
         return queries
 
 

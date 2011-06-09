@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.0 2011/05/03 22:29:15 egor Exp $"""
+$Id: zenperfsql.py,v 2.1 2011/06/09 20:18:38 egor Exp $"""
 
-__version__ = "$Revision: 2.0 $"[11:-2]
+__version__ = "$Revision: 2.1 $"[11:-2]
 
 import logging
 
@@ -113,17 +113,18 @@ class ZenPerfSqlTaskSplitter(object):
             for tn, (sql,sqlp,kbs,cs,columns) in config.queries.iteritems():
                 table = (tn, columns)
                 ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
-                ival = tuple([str(v).upper() for v in (kbs or {}).values()])
+                ival = tuple([str(v).strip().upper() \
+                                                for v in (kbs or {}).values()])
                 if cs not in queries:
                     queries[cs] = {}
                     qIdx[cs] = {}
                 if sqlp not in queries[cs]:
                     if sqlp in qIdx[cs]:
-                        queries[cs][sqlp] = queries[cs][qIdx[cs][sqlp]]
-                        del queries[cs][qIdx[cs][sqlp]]
+                        queries[cs][sqlp] = qIdx[cs][sqlp][1]
+                        del queries[cs][qIdx[cs][sqlp][0]]
                     else:
-                        qIdx[cs][sqlp] = sql
-                        queries[cs][sql]={ikey:{ival:[table]}}
+                        qIdx[cs][sqlp] = (sql, {ikey:{ival:[table]}})
+                        queries[cs][sql]={():{():[table]}}
                         continue
                 if ikey not in queries[cs][sqlp]:
                     queries[cs][sqlp][ikey] = {ival:[table]}
@@ -131,6 +132,7 @@ class ZenPerfSqlTaskSplitter(object):
                     queries[cs][sqlp][ikey][ival] = [table]
                 else:
                     queries[cs][sqlp][ikey][ival].append(table)
+            qIdx = None
             del config.queries
             del config.datapoints
             del config.thresholds
@@ -233,6 +235,7 @@ class ZenPerfSqlTask(ObservableMixin):
         on the collection can be displayed.
         """
 
+        self._cleanup()
         if not isinstance(result, Failure):
             log.debug("Device %s [%s] scanned successfully",
                       self._devId, self._manageIp)

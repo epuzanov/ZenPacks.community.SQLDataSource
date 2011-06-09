@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.2'
+__version__ = '2.0.3'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -458,8 +458,8 @@ class wbemCursor(object):
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation.replace('\\',
-                                                '\\\\').replace('\\\\"','\\"'))
+            self.connection._execute(self, operation.replace('\\', '\\\\'
+                                                    ).replace('\\\\"', '\\"'))
             if self.description: self.rownumber = 0
 
         except OperationalError, e:
@@ -616,10 +616,10 @@ class pywbemCnx:
                     )
                 if [v for v in cursor._keybindings.values() if type(v) is list]:
                     query = 'SELECT %s FROM %s'%(props, classname)
-                else: cursor._keybindings.clear()
+                elif self._dialect: cursor._keybindings.clear()
             except: cursor._keybindings.clear()
         if props == '*': cursor._props = []
-        else:cursor._props=[p for p in set(props.replace(' ','').split(','))]
+        else: cursor._props = [p for p in props.replace(' ','').split(',')]
         self._lock.acquire()
         try:
             try:
@@ -632,7 +632,7 @@ class pywbemCnx:
                 else:
                     method = 'EnumerateInstances'
                     cursor._methodname = method
-                    pLst = [p for p in cursor._props \
+                    pLst = [p for p in set(cursor._props) \
                         if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
                     xml_repl = self._wbem_request(method, XML_REQ%(method,
                         '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
