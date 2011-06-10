@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.2 2011/05/09 20:00:36 egor Exp $"""
+$Id: SQLClient.py,v 2.3 2011/05/10 19:05:46 egor Exp $"""
 
-__version__ = "$Revision: 2.2 $"[11:-2]
+__version__ = "$Revision: 2.3 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -102,6 +102,8 @@ class SQLClient(BaseClient):
 
 
     def parseValue(self, value):
+        if isinstance(value, datetime.timedelta):
+            return DateTime(datetime.datetime.now() - value)
         if isinstance(value, datetime.datetime): return DateTime(value)
         if isinstance(value, decimal.Decimal): return long(value)
         if type(value) not in (str, unicode): return value

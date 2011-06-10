@@ -20,11 +20,11 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.2.2'
+__version__ = '1.2.3'
 
 import threading
 import sys 
-import datetime
+from datetime import datetime, timedelta
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -146,21 +146,21 @@ def DateFromTicks(ticks):
     This function constructs an object holding a date value from the given
     ticks value.
     """
-    return Date(*datetime.datetime.fromtimestamp(ticks).timetuple()[:3])
+    return Date(*datetime.fromtimestamp(ticks).timetuple()[:3])
 
 def TimeFromTicks(ticks):
     """
     This function constructs an object holding a time value from the given
     ticks value.
     """
-    return Time(*datetime.datetime.fromtimestamp(ticks).timetuple()[3:6])
+    return Time(*datetime.fromtimestamp(ticks).timetuple()[3:6])
 
 def TimestampFromTicks(ticks):
     """
     This function constructs an object holding a time stamp value from the
     given ticks value.
     """
-    return Timestamp(*datetime.datetime.fromtimestamp(ticks).timetuple()[:6])
+    return Timestamp(*datetime.fromtimestamp(ticks).timetuple()[:6])
 
 def Binary(string):
     """
@@ -450,14 +450,10 @@ class pysambaCnx:
             r = DTPAT.match(str(v.v_string))
             if not r: return v.v_string
             tt = map(int, r.groups(0))
-            if tt[7] < 30:
-                if tt[7] < 0:
-                    td = datetime.timedelta(0, tt[7] * 3600 - tt[8] * 60,0)
-                else:
-                    td = datetime.timedelta(0, tt[7] * 3600 + tt[8] * 60,0)
-            else:
-                td = datetime.timedelta(0, tt[7] * 60, 0)
-            return datetime.datetime(*tt[:7]) - td
+            if abs(tt[7]) > 30: minutes = tt[7]
+            elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+            else: minutes = 60 * tt[7] + tt[8]
+            return datetime(*tt[:7]) - timedelta(minutes=minutes)
         if typeval == CIM_ARR_SINT8: return self._convertArray(v.a_sint8)
         if typeval == CIM_ARR_UINT8: return self._convertArray(v.a_uint8)
         if typeval == CIM_ARR_SINT16: return self._convertArray(v.a_sint16)
@@ -501,7 +497,10 @@ class pysambaCnx:
                             eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
                             )
                         if [v for v in cursor._kbs.values() if type(v) is list]:
-                            query = 'SELECT %s FROM %s'%(props, classname)
+                            kbkeys = ''
+                            if props != '*':
+                                kbkeys = ',%s'%','.join(cursor._kbs.keys())
+                            query='SELECT %s%s FROM %s'%(props,kbkeys,classname)
                         else: cursor._kbs.clear()
                     except: cursor._kbs.clear()
                 props = props.replace(' ','').split(',')
@@ -726,14 +725,10 @@ class win32comCnx:
             r = DTPAT.match(value)
             if not r: return str(value)
             tt = map(int, r.groups(0))
-            if tt[7] < 30:
-                if tt[7] < 0:
-                    td = datetime.timedelta(0, tt[7] * 3600 - tt[8] * 60,0)
-                else:
-                    td = datetime.timedelta(0, tt[7] * 3600 + tt[8] * 60,0)
-            else:
-                td = datetime.timedelta(0, tt[7] * 60, 0)
-            return datetime.datetime(*tt[:7]) - td
+            if abs(tt[7]) > 30: minutes = tt[7]
+            elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+            else: minutes = 60 * tt[7] + tt[8]
+            return datetime(*tt[:7]) - timedelta(minutes=minutes)
         return value
 
     def _execute(self, cursor, query):
@@ -753,7 +748,10 @@ class win32comCnx:
                             eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
                             )
                         if [v for v in kbs.values() if type(v) is list]:
-                            query = 'SELECT %s FROM %s'%(props, classname)
+                            kbkeys = ''
+                            if props != '*':
+                                kbkeys = ',%s'%','.join(kbs.keys())
+                            query='SELECT %s%s FROM %s'%(props,kbkeys,classname)
                         else: kbs = {}
                     except: kbs = {}
                 del cursor._rows[:]

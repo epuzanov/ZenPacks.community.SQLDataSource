@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.3'
+__version__ = '2.0.4'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -279,9 +279,10 @@ class WSMHandler(handler.ContentHandler):
         r = DTPAT.match(value)
         if not r: return str(value)
         tt = map(int, r.groups(0))
-        if tt[7] > 30: td = timedelta(minutes=tt[7])
-        else: td = timedelta(hours=tt[7], minutes=tt[8])
-        return datetime(*tt[:7]) - td
+        if abs(tt[7]) > 30: minutes = tt[7]
+        elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+        else: minutes = 60 * tt[7] + tt[8]
+        return datetime(*tt[:7]) #+ timedelta(minutes=minutes)
 
 
     def _convert(self, value, pType=None):
@@ -705,7 +706,10 @@ class wsmanCnx:
                     eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
                     )
                 if [v for v in cursor._selectors.values() if type(v) is list]:
-                    query = 'SELECT %s FROM %s'%(props, classname)
+                    kbkeys = ''
+                    if props != '*':
+                        kbkeys = ',%s'%','.join(cursor._selectors.keys())
+                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
                 elif self._dialect: cursor._selectors.clear()
             except: cursor._selectors.clear()
         if props == '*': cursor._props = []

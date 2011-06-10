@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.3'
+__version__ = '2.0.4'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -246,7 +246,7 @@ class CIMHandler(handler.ContentHandler):
         s = DTPAT.match(dtarg)
         if s is not None:
             tt = map(int, s.groups(0))
-            return datetime(*tt[:7]) - timedelta(minutes=tt[7])
+            return datetime(*tt[:7]) #+ timedelta(minutes=tt[7])
         s = TDPAT.match(dtarg)
         if s is None: return str(dtarg)
         return timedelta(**dict(zip(('days','hours','minutes','microseconds'),
@@ -615,7 +615,10 @@ class pywbemCnx:
                     eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
                     )
                 if [v for v in cursor._keybindings.values() if type(v) is list]:
-                    query = 'SELECT %s FROM %s'%(props, classname)
+                    kbkeys = ''
+                    if props != '*':
+                        kbkeys = ',%s'%','.join(cursor._keybindings.keys())
+                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
                 elif self._dialect: cursor._keybindings.clear()
             except: cursor._keybindings.clear()
         if props == '*': cursor._props = []
@@ -634,6 +637,7 @@ class pywbemCnx:
                     cursor._methodname = method
                     pLst = [p for p in set(cursor._props) \
                         if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
+                    pLst.extend(cursor._keybindings.keys())
                     xml_repl = self._wbem_request(method, XML_REQ%(method,
                         '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
                         ),''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
