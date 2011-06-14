@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.4'
+__version__ = '2.0.5'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -632,16 +632,15 @@ class wsmanCnx:
         self._namespace = kwargs.get('namespace', 'root/cimv2')
         self._url='%s://%s:%s%s'%(self._scheme,self._host,self._port,self._path)
         self._urlOpener = urllib2.build_opener()
-        uname = kwargs.get('user', '')
-        if uname:
+        if 'user' in kwargs:
             passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
-            passman.add_password(None,self._url,uname,kwargs.get('password',''))
+            passman.add_password(None,self._url,kwargs['user'],
+                                            kwargs.get('password', ''))
             authhandler = urllib2.HTTPBasicAuthHandler(passman)
             self._urlOpener.add_handler(authhandler)
-        key_file = kwargs.get('key_file', '')
-        cert_file = kwargs.get('cert_file', '')
-        if key_file and cert_file:
-            sslauthhandler = HTTPSClientAuthHandler(key_file, cert_file)
+        elif 'key_file' in kwargs and 'cert_file' in kwargs:
+            sslauthhandler = HTTPSClientAuthHandler(kwargs['key_file'],
+                                                    kwargs['cert_file'])
             self._urlOpener.add_handler(sslauthhandler)
         self._wsm_vendor = ''
         xml_repl = self._wsman_request("""<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsmid="http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd">
@@ -675,21 +674,20 @@ class wsmanCnx:
         request = urllib2.Request(self._url, data, headers)
 
         tryLimit = 5
-        while tryLimit:
+        xml_repl = None
+        while not xml_repl:
             tryLimit -= 1
             try:
                 xml_repl = self._urlOpener.open(request)
-                if self._wsm_vendor == 'Openwsman': xml_repl.readline()
-                return xml_repl
             except urllib2.HTTPError, arg:
-                raise InterfaceError('HTTP error: %s' % arg.code)
+                if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
+                else: raise InterfaceError('HTTP error: %s' % arg.code)
             except urllib2.URLError, arg:
-                if arg.reason[0] in [32, 104]: continue
-                raise InterfaceError('socket error: %s' % arg.reason)
-        if hasattr(arg, reason):
-            raise InterfaceError('socket error: %s' % arg.reason)
-        else:
-            raise InterfaceError('HTTP error: %s' % arg.code)
+                if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
+                else: raise InterfaceError('socket error: %s' % arg.reason)
+        if self._wsm_vendor == 'Openwsman': xml_repl.readline()
+        return xml_repl
+
 
     def _execute(self, cursor, query):
         """
