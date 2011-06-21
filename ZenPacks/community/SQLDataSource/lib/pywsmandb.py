@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.5'
+__version__ = '2.0.6'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -125,6 +125,24 @@ TYPEDICT = {'sint8':CIM_SINT8, 'uint8':CIM_UINT8,
             'boolean':CIM_BOOLEAN, 'datetime':CIM_DATETIME,
             'object':CIM_OBJECT, 'reference':CIM_REFERENCE}
 
+def _datetime(dtarg):
+    """
+    Convert string to datetime.
+    """
+    r = DTPAT.match(dtarg)
+    if not r: return str(dtarg)
+    tt = map(int, r.groups(0))
+    if abs(tt[7]) > 30: minutes = tt[7]
+    elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+    else: minutes = 60 * tt[7] + tt[8]
+    return datetime(*tt[:7]) #+ timedelta(minutes=minutes)
+
+TYPEFUNCT = {CIM_UINT8: int, CIM_UINT16: int, CIM_UINT32: int, CIM_UINT64: long,
+            CIM_SINT8: int, CIM_SINT16: int, CIM_SINT32: int, CIM_SINT64: long,
+            CIM_REAL32: float, CIM_REAL64: float, CIM_STRING: str,
+            CIM_CHAR16: str, CIM_OBJECT: str, CIM_REFERENCE: str,
+            CIM_BOOLEAN: (lambda v: v.lower() is 'true'),
+            CIM_DATETIME: _datetime}
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -272,19 +290,6 @@ class WSMHandler(handler.ContentHandler):
         return CIM_STRING
 
 
-    def _datetime(self, value):
-        """
-        Convert string to datetime.
-        """
-        r = DTPAT.match(value)
-        if not r: return str(value)
-        tt = map(int, r.groups(0))
-        if abs(tt[7]) > 30: minutes = tt[7]
-        elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
-        else: minutes = 60 * tt[7] + tt[8]
-        return datetime(*tt[:7]) #+ timedelta(minutes=minutes)
-
-
     def _convert(self, value, pType=None):
         """
         Convert CIM types to Python standard types.
@@ -293,24 +298,7 @@ class WSMHandler(handler.ContentHandler):
         if pType > CIM_FLAG_ARRAY:
             if not hasattr(value, '__iter__'): value = [value]
             return [self._convert(v, pType - CIM_FLAG_ARRAY) for v in value]
-        return {
-            CIM_UINT8: int,
-            CIM_UINT16: int,
-            CIM_UINT32: int,
-            CIM_UINT64: long,
-            CIM_SINT8: int,
-            CIM_SINT16: int,
-            CIM_SINT32: int,
-            CIM_SINT64: long,
-            CIM_REAL32: float,
-            CIM_REAL64: float,
-            CIM_STRING: str,
-            CIM_CHAR16: str,
-            CIM_OBJECT: str,
-            CIM_REFERENCE: str,
-            CIM_BOOLEAN: (lambda val: val.lower() is 'true'),
-            CIM_DATETIME: self._datetime,
-        }.get(pType, str)(value)
+        return TYPEFUNCT.get(pType, str)(value)
 
 
     def startElementNS(self, name, qname, attrs):

@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.5'
+__version__ = '2.0.6'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -105,6 +105,35 @@ CIM_ARR_CHAR16=CIM_FLAG_ARRAY|CIM_CHAR16
 CIM_ARR_OBJECT=CIM_FLAG_ARRAY|CIM_OBJECT
 CIM_ILLEGAL=0xfff
 CIM_TYPEMASK=0x2FFF
+TYPEDICT = {'sint8':CIM_SINT8, 'uint8':CIM_UINT8, 
+            'sint16':CIM_SINT16, 'uint16':CIM_UINT16,
+            'sint32':CIM_SINT32, 'uint32':CIM_UINT32,
+            'sint64':CIM_SINT64, 'uint64':CIM_UINT64,
+            'real32':CIM_REAL32, 'real64':CIM_REAL64,
+            'string': CIM_STRING, 'char16':CIM_CHAR16,
+            'boolean':CIM_BOOLEAN, 'datetime':CIM_DATETIME,
+            'object':CIM_OBJECT, 'reference':CIM_REFERENCE}
+
+def _datetime(dtarg):
+    """
+    Convert string to datetime.
+    """
+    s = DTPAT.match(dtarg)
+    if s is not None:
+        tt = map(int, s.groups(0))
+        return datetime(*tt[:7]) #+ timedelta(minutes=tt[7])
+    s = TDPAT.match(dtarg)
+    if s is None: return str(dtarg)
+    return timedelta(**dict(zip(('days','hours','minutes','microseconds'),
+                                                    map(int, s.groups(0)))))
+
+TYPEFUNCT = {CIM_UINT8: int, CIM_UINT16: int, CIM_UINT32: int, CIM_UINT64: long,
+            CIM_SINT8: int, CIM_SINT16: int, CIM_SINT32: int, CIM_SINT64: long,
+            CIM_REAL32: float, CIM_REAL64: float, CIM_STRING: str,
+            CIM_CHAR16: str, CIM_OBJECT: str, CIM_REFERENCE: str,
+            CIM_BOOLEAN: (lambda v: v.lower() is 'true'),
+            CIM_DATETIME: _datetime}
+
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -234,46 +263,11 @@ class CIMHandler(handler.ContentHandler):
         self._qName = ''
         self._pName = ''
         self._pType = ''
-        self._pVal = None
+        self._pVal = []
         self._pdict = {}
         self._kbs = []
         self._maxlen = {}
 
-    def _datetime(self, dtarg):
-        """
-        Convert string to datetime.
-        """
-        s = DTPAT.match(dtarg)
-        if s is not None:
-            tt = map(int, s.groups(0))
-            return datetime(*tt[:7]) #+ timedelta(minutes=tt[7])
-        s = TDPAT.match(dtarg)
-        if s is None: return str(dtarg)
-        return timedelta(**dict(zip(('days','hours','minutes','microseconds'),
-                                                        map(int, s.groups(0)))))
-
-    def _parseType(self, ptype):
-        """
-        Return type number and convert function.
-        """
-        return {
-            'uint8': (CIM_UINT8, int),
-            'uint16': (CIM_UINT16, int),
-            'uint32': (CIM_UINT32, int),
-            'uint64': (CIM_UINT64, long),
-            'sint8': (CIM_SINT8, int),
-            'sint16': (CIM_SINT16, int),
-            'sint32': (CIM_SINT32, int),
-            'sint64': (CIM_SINT64, long),
-            'real32': (CIM_REAL32, float),
-            'real64': (CIM_REAL64, float),
-            'string': (CIM_STRING, str),
-            'char16': (CIM_CHAR16, str),
-            'object': (CIM_OBJECT, str),
-            'reference': (CIM_REFERENCE, str),
-            'boolean': (CIM_BOOLEAN, (lambda val: val.lower() is 'true')),
-            'datetime': (CIM_DATETIME, self._datetime),
-        }.get(ptype, (CIM_STRING, str))
 
     def startElement(self, name, attrs):
         if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
@@ -291,24 +285,23 @@ class CIMHandler(handler.ContentHandler):
                             'Error code %s'%errcode))
             else:
                 raise InterfaceError(0,'Expecting %s element, got %s'%(tag,name))
-#        elif name == 'QUALIFIER':
-#            self._qName = str(attrs._attrs.get('NAME', ''))
         elif name == 'PROPERTY':
             self._pName = str(attrs._attrs.get('NAME', ''))
-            self._pType = str(attrs._attrs.get('TYPE', 'string'))
-            self._pVal = None
+            self._pType = TYPEDICT.get(attrs._attrs.get('TYPE', ''), CIM_STRING)
+            del self._pVal[:]
             if type(self._cur.description) is tuple: return
             self._cur.description.append((self._pName,
-                self._parseType(self._pType)[0], None, None, None, None, None))
+                                    self._pType, None, None, None, None, None))
         elif name == 'PROPERTY.ARRAY':
             self._pName = str(attrs._attrs.get('NAME', ''))
-            self._pType = str(attrs._attrs.get('TYPE', 'string'))
-            self._pVal = []
+            self._pType = TYPEDICT.get(attrs._attrs.get('TYPE', ''), CIM_STRING)
+            del self._pVal[:]
             if type(self._cur.description) is tuple: return
             self._cur.description.append((self._pName,
-                0x2000|self._parseType(self._pType)[0],None,None,None,None,None))
+                            0x2000|self._pType, None, None, None, None, None))
         elif name == 'KEYVALUE':
-            self._pType = str(attrs._attrs.get('VALUETYPE', 'string'))
+            self._pType=TYPEDICT.get(attrs._attrs.get('VALUETYPE',''),CIM_STRING)
+            del self._pVal[:]
         elif name == 'KEYBINDING':
             self._pName = str(attrs._attrs.get('NAME', ''))
         elif name == 'INSTANCE':
@@ -322,30 +315,32 @@ class CIMHandler(handler.ContentHandler):
         if not content.strip(): return
         if content == 'NULL': val = None
         else:
-            try: val = self._parseType(self._pType)[1](content)
+            try: val = TYPEFUNCT.get(self._pType, str)(content)
             except ValueError: val = unicode(content)
-        if type(self._pVal) is list: self._pVal.append(val)
-        else: self._pVal = val
+        self._pVal.append(val)
 
 
     def endElement(self, name):
         if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
             'VALUE', 'KEYVALUE'): return
-#        if name == 'QUALIFIER':
-#            if self._qName == 'Key' and self._pVal.upper() == 'TRUE':
-#                self._cur._keybindings[self._pName] = self._pType
-#            elif self._qName == 'MaxLen':
-#                self._maxlen[self._pName] = int(self._pVal)
         if name == 'PROPERTY':
-            self._pdict[self._pName.upper()] = self._pVal
+            if len(self._pVal) == 1:
+                self._pdict[self._pName.upper()] = self._pVal[0]
+            elif not self._pVal:
+                self._pdict[self._pName.upper()] = None
+            elif len(self._pVal) > 1 and self._pType == STRING:
+                self._pdict[self._pName.upper()] = '\n'.join(self._pVal)
+            else:
+                self._pdict[self._pName.upper()] = self._pVal[0]
+            del self._pVal[:]
         elif name == 'PROPERTY.ARRAY':
             self._pdict[self._pName.upper()] = self._pVal
-            self._pVal = None
+            self._pVal = []
         elif name == 'KEYBINDING':
-            if self._pType == 'string':
-                self._kbs.append('%s="%s"'%(self._pName, self._pVal))
+            if self._pType == STRING:
+                self._kbs.append('%s="%s"'%(self._pName, self._pVal[0]))
             else:
-                self._kbs.append('%s=%s'%(self._pName, self._pVal))
+                self._kbs.append('%s=%s'%(self._pName, self._pVal[0]))
         elif name == 'INSTANCE':
             if type(self._cur.description) is list:
                 if self._cur._props:
