@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.6'
+__version__ = '2.0.7'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -639,7 +639,7 @@ class wsmanCnx:
 </s:Envelope>""").read()
         if 'ProductVendor' not in xml_repl:
             raise InterfaceError,"Access denied for user '%s' to '%s'"%(
-                                                                uname,self._url)
+                                            kwargs.get('user', ''), self._url)
         elif 'Microsoft' in xml_repl: self._wsm_vendor = 'Microsoft'
         elif 'Openwsman' in xml_repl: self._wsm_vendor = 'Openwsman'
         else: self._wsm_vendor = ''
