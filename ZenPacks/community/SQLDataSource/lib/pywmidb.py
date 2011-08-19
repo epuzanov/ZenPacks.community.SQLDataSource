@@ -20,10 +20,10 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.2.3'
+__version__ = '1.3.0'
 
 import threading
-import sys 
+import sys
 from datetime import datetime, timedelta
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
@@ -244,11 +244,7 @@ class wmiCursor(object):
         self.description = None
         self.rownumber = -1
         self.arraysize = 1
-        self._pEnum = None
-        self._kbIdx = []
-        self._pIdx = []
         self._rows = []
-        self._kbs = {}
 
     def _check_executed(self):
         if not getattr(self.connection, '_ctx', None):
@@ -263,11 +259,7 @@ class wmiCursor(object):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
-        del self._kbIdx[:]
-        del self._pIdx[:]
         del self._rows[:]
-        self._kbs.clear()
-        self._pEnum = None
         self.description = None
 
     def execute(self, operation, *args):
@@ -327,37 +319,35 @@ class wmiCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        return self.connection._fetchone(self)
+        if not self._rows: return None
+        self.rownumber += 1
+        return self._rows.pop(0)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if not size: size = self.arraysize
+        lastrow = self.rownumber + (size or self.arraysize)
         results = []
-        row = self.connection._fetchone(self)
-        while size and row:
-            results.append(row)
-            size -= 1
-            if size: row = self.connection._fetchone(self)
+        while self._rows and lastrow > self.rownumber:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
         return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
-        results = []
-        row = self.connection._fetchone(self)
-        while row:
-            results.append(row)
-            row = self.connection._fetchone(self)
+        self.rownumber = len(self._rows)
+        results = self._rows[:]
+        del self._rows[:]
         return results
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        row = self.connection._fetchone(self)
-        if not row: raise StopIteration
-        return row
+        if not self._rows: raise StopIteration
+        self.rownumber += 1
+        return self._rows.pop(0)
 
     def __iter__(self):
         """
@@ -481,29 +471,23 @@ class pysambaCnx:
         self._lock.acquire()
         try:
             try:
-                if cursor._pEnum:
-                    result = library.IUnknown_Release(cursor._pEnum, self._ctx)
-                    WERR_CHECK(result, self._host, "Release")
-                else:
-                    cursor._pEnum = POINTER(IEnumWbemClassObject)()
+                pEnum = POINTER(IEnumWbemClassObject)()
+                objs = (POINTER(WbemClassObject) * self._wmibatchSize)()
+                count = uint32_t()
                 del cursor._rows[:]
-                del cursor._kbIdx[:]
-                del cursor._pIdx[:]
                 props, classname, where = WQLPAT.match(query).groups('')
-                cursor._kbs.clear()
+                kbs = {}
                 if where:
-                    try:
-                        cursor._kbs.update(
-                            eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
-                            )
-                        if [v for v in cursor._kbs.values() if type(v) is list]:
-                            kbkeys = ''
-                            if props != '*':
-                                kbkeys = ',%s'%','.join(cursor._kbs.keys())
-                            query='SELECT %s%s FROM %s'%(props,kbkeys,classname)
-                        else: cursor._kbs.clear()
-                    except: cursor._kbs.clear()
-                props = props.replace(' ','').split(',')
+                    try:kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',
+                                                                        where)))
+                    except: pass
+                    if [v for v in kbs.values() if type(v) is list]:
+                        kbkeys = ''
+                        if props != '*':
+                            kbkeys = ',%s'%','.join(kbs.keys())
+                        query='SELECT %s%s FROM %s'%(props, kbkeys, classname)
+                    else: kbs.clear()
+                props = props.upper().replace(' ','').split(',')
                 if '*' in props: props.remove('*')
                 result = library.IWbemServices_ExecQuery(
                             self._pWS,
@@ -514,139 +498,81 @@ class pysambaCnx:
                             WBEM_FLAG_RETURN_IMMEDIATELY | \
                             WBEM_FLAG_ENSURE_LOCATABLE,
                             None,
-                            byref(cursor._pEnum))
+                            byref(pEnum))
                 WERR_CHECK(result, self._host, "ExecQuery")
-                objs = (POINTER(WbemClassObject)*1)()
-                count = uint32_t()
                 result = library.IEnumWbemClassObject_SmartNext(
-                            cursor._pEnum,
+                            pEnum,
                             self._ctx,
                             -1,
-                            1,
+                            self._wmibatchSize,
                             objs,
                             byref(count))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
                 if count.value == 0: return
                 klass = objs[0].contents.obj_class.contents
                 inst = objs[0].contents.instance.contents
-                pdict = {}
                 cimclass = getattr(klass, '__CLASS', '')
                 cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
                                             '').replace('\\', '/')
-                iPath = []
+                dDict = {}
+                maxlen = {}
+                kbKeys = []
                 for j in range(getattr(klass, '__PROPERTY_COUNT')):
                     prop = klass.properties[j]
                     if not prop.name: continue
-                    ptype = prop.desc.contents.cimtype & CIM_TYPEMASK
-                    null_ok = None
-                    maxlen = None
+                    uName = prop.name.upper()
                     for i in range(prop.desc.contents.qualifiers.count):
                         q = prop.desc.contents.qualifiers.item[i].contents
                         if q.name in ['key']:
-                            if j in cursor._kbIdx: continue
-                            if self._convert(q.value, q.cimtype):
-                                cursor._kbIdx.append(j)
-                                null_ok = False
-                                value = self._convert(inst.data[j], ptype)
-                                if ptype != NUMBER:
-                                    value = '"%s"'%value
-                                iPath.append('%s=%s'%(str(prop.name),value))
+                            if uName not in kbKeys: kbKeys.append(uName)
                         if q.name == 'MaxLen':
-                            maxlen = self._convert(q.value, q.cimtype)
-                    pdict[prop.name] = [prop.name, ptype, maxlen, maxlen,
-                                                        None, None, null_ok, j]
+                            maxlen[uName] = self._convert(q.value, q.cimtype)
+                    dDict[uName] = (prop.name,
+                                prop.desc.contents.cimtype & CIM_TYPEMASK,
+                                maxlen.get(uName, None),maxlen.get(uName, None),
+                                None, None, None)
                 if not props:
-                    props = pdict.keys()
+                    props = dDict.keys()
                     props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
-                descr = []
-                row = []
-                for pn in props:
-                    rDescr = pdict.get(pn,[pn,8,None,None,None,None,None,-1])
-                    pIdx = rDescr.pop()
-                    cursor._pIdx.append(pIdx)
-                    descr.append(tuple(rDescr))
-                    uPn = pn.upper()
-                    if uPn == '__NAMESPACE': row.append(cimnamespace)
-                    elif uPn == '__CLASS': row.append(cimclass)
-                    elif uPn == '__PATH':
-                        row.append(cimclass + '.' + ','.join(iPath))
-                    elif pIdx == -1: row.append(None)
-                    else: row.append(self._convert(inst.data[pIdx], rDescr[1]))
-                    if pn in cursor._kbs:
-                        if row[-1] != cursor._kbs[pn]: row.pop(-1)
-                cursor.description = tuple(descr)
-                if len(row) == len(descr): cursor._rows.append(tuple(row))
-                talloc_free(objs[0])
-                pdict.clear()
-
-
-            except WError, e:
-                raise OperationalError, e
-
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            objs = None
-            count = None
-            self._lock.release()
-
-
-    def _fetchone(self, cursor):
-        """
-        Execute WQL query and fetch first row
-        """
-        if self._ctx is None:
-            raise InterfaceError, "Connection closed."
-        if cursor._rows:
-            cursor.rownumber += 1
-            return cursor._rows.pop(0)
-        if not cursor._pEnum: return None
-        self._lock.acquire()
-        try:
-            try:
-                objs = (POINTER(WbemClassObject)*self._wmibatchSize)()
-                count = uint32_t()
-                while cursor._pEnum and not cursor._rows:
+                cursor.description = tuple([dDict.get(p,[p, 8, None, None, None,
+                                                None, None]) for p in props])
+                while count.value != 0:
+                    for i in range(count.value):
+                        klass = objs[i].contents.obj_class.contents
+                        inst = objs[i].contents.instance.contents
+                        pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
+                            '__NAMESPACE':getattr(objs[i].contents,'__NAMESPACE'
+                                                        ,'').replace('\\', '/')}
+                        for j in range(getattr(klass, '__PROPERTY_COUNT')):
+                            prop = klass.properties[j]
+                            if not prop.name: continue
+                            uName = prop.name.upper()
+                            if uName not in (props + kbKeys): continue
+                            pdict[uName] = self._convert(inst.data[j],
+                                    prop.desc.contents.cimtype & CIM_TYPEMASK)
+                            if prop.name not in kbs: continue
+                            if kbs[prop.name] != pdict[uName]: break
+                        else:
+                            if '__PATH' in props:
+                                iPath = []
+                                for k in kbKeys:
+                                    kbn, kbType = dDict.get(k, (k, 8))[:2]
+                                    if kbType != NUMBER:
+                                        iPath.append('%s="%s"'%(kbn, pdict[k]))
+                                    else:
+                                        iPath.append('%s=%s'%(kbn, pdict[k]))
+                                pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
+                                                            ','.join(iPath))
+                            cursor._rows.append(tuple([pdict.get(p, None
+                                                            ) for p in props]))
                     result = library.IEnumWbemClassObject_SmartNext(
-                            cursor._pEnum,
+                            pEnum,
                             self._ctx,
                             -1,
                             self._wmibatchSize,
                             objs,
                             byref(count))
                     WERR_CHECK(result, self._host, "Retrieve result data.")
-                    if count.value == 0: cursor._pEnum = None
-                    for i in range(count.value):
-                        row = []
-                        klass = objs[i].contents.obj_class.contents
-                        inst = objs[i].contents.instance.contents
-                        cimclass = getattr(klass, '__CLASS', '')
-                        cimnamespace = getattr(objs[i].contents, '__NAMESPACE',
-                                                        '').replace('\\', '/')
-                        for j, rd in zip(cursor._pIdx, cursor.description):
-                            uName = rd[0].upper()
-                            if uName == '__NAMESPACE': row.append(cimnamespace)
-                            elif uName == '__CLASS': row.append(cimclass)
-                            elif uName == '__PATH':
-                                iPath = []
-                                for j in cursor._kbIdx:
-                                    prop = klass.properties[j]
-                                    ptype=prop.desc.contents.cimtype & CIM_TYPEMASK
-                                    value = self._convert(inst.data[j], ptype)
-                                    if ptype != NUMBER:
-                                        value = '"%s"'%value
-                                    iPath.append('%s=%s'%(str(prop.name),value))
-                                row.append(cimclass + '.' + ','.join(iPath))
-                            elif j == -1: row.append(None)
-                            else: row.append(self._convert(inst.data[j], rd[1]))
-                            if rd[0] in cursor._kbs:
-                                if row[-1] != cursor._kbs[rd[0]]: row.pop(-1)
-                        talloc_free(objs[i])
-                        if len(row)==len(cursor.description):
-                            cursor._rows.append(tuple(row))
-                if not cursor._rows: return None
-                cursor.rownumber += 1
-                return cursor._rows.pop(0)
 
             except WError, e:
                 raise OperationalError, e
@@ -654,9 +580,13 @@ class pysambaCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
+            for i in range(self._wmibatchSize):
+                talloc_free(objs[i]) 
+            pEnum = None
             objs = None
             count = None
             self._lock.release()
+
 
     def __del__(self):
         self.close()
@@ -743,19 +673,16 @@ class win32comCnx:
                 props, classname, where = WQLPAT.match(query).groups('')
                 kbs = {}
                 if where:
-                    try:
-                        kbs.update(
-                            eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',where))
-                            )
-                        if [v for v in kbs.values() if type(v) is list]:
-                            kbkeys = ''
-                            if props != '*':
-                                kbkeys = ',%s'%','.join(kbs.keys())
-                            query='SELECT %s%s FROM %s'%(props,kbkeys,classname)
-                        else: kbs = {}
-                    except: kbs = {}
+                    try:kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',
+                                                                        where)))
+                    except: pass
+                    if [v for v in kbs.values() if type(v) is list]:
+                        kbkeys = ''
+                        if props != '*':
+                            kbkeys = ',%s'%','.join(kbs.keys())
+                        query='SELECT %s%s FROM %s'%(props, kbkeys, classname)
+                    else: kbs.clear()
                 del cursor._rows[:]
-                del cursor._pIdx[:]
                 typedict = {}
                 maxlen = {}
                 objSet = self._ctx.ExecQuery(query)
@@ -786,25 +713,12 @@ class win32comCnx:
                         pdict.clear()
                         break
                     if not pdict: continue
-                    row = tuple([pdict.get(pn.upper(), None) for pn in props])
-                    cursor._rows.append(row)
+                    cursor._rows.append(tuple([pdict.get(pn.upper(),
+                                                        None) for pn in props]))
             except Exception, e:
                 raise OperationalError, e
         finally:
             self._lock.release()
-
-
-    def _fetchone(self, cursor):
-        """
-        Execute WQL query and fetch first row
-        """
-        if self._ctx is None:
-            raise InterfaceError, "Connection closed."
-        if cursor._rows:
-            cursor.rownumber += 1
-            return cursor._rows.pop(0)
-        else: return None
-
 
     def __del__(self):
         self.close()

@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.3 2011/05/10 19:05:46 egor Exp $"""
+$Id: SQLClient.py,v 2.4 2011/08/19 18:35:39 egor Exp $"""
 
-__version__ = "$Revision: 2.3 $"[11:-2]
+__version__ = "$Revision: 2.4 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -212,8 +212,8 @@ class SQLClient(BaseClient):
                     results.update(self.parseResults(dbcursor, resMaps))
                 except StandardError, ex:
                     results.update(self.parseError(ex, sql, resMaps))
-            dbcursor = None
-            connection = None
+            dbcursor.close()
+            connection.close()
         return results
 
 
