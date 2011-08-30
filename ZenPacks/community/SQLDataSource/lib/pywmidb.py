@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 import threading
 import sys
@@ -378,7 +378,7 @@ class pysambaCnx:
 
     def __init__(self, *args, **kwargs):
         self._lock = threading.RLock()
-        self._host = kwargs.get('host', None)
+        self._host = kwargs.get('host', 'localhost')
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wmibatchSize = kwargs.get('wmibatchSize', 5)
@@ -534,8 +534,8 @@ class pysambaCnx:
                 if not props:
                     props = dDict.keys()
                     props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
-                cursor.description = tuple([dDict.get(p,[p, 8, None, None, None,
-                                                None, None]) for p in props])
+                cursor.description = tuple([dDict.get(p,(p, 8, None, None, None,
+                                                None, None)) for p in props])
                 while count.value != 0:
                     for i in range(count.value):
                         klass = objs[i].contents.obj_class.contents
@@ -633,7 +633,7 @@ class win32comCnx:
     """
     def __init__(self, *args, **kwargs):
         self._lock = threading.RLock()
-        self._host = kwargs.get('host', None)
+        self._host = kwargs.get('host', 'localhost')
         self._ctx = None
         self._swl = None
         username = kwargs.get('user', '')

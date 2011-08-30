@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.2 2011/08/19 19:33:41 egor Exp $"""
+$Id: SQLPlugin.py,v 2.3 2011/08/30 23:10:50 egor Exp $"""
 
-__version__ = "$Revision: 2.2 $"[11:-2]
+__version__ = "$Revision: 2.3 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
@@ -50,10 +50,7 @@ class SQLPlugin(CollectorPlugin):
     def preprocess(self, results, log):
         newres = {}
         for table, value in results.iteritems():
-            if value != []:
-                if isinstance(value[0], Failure):
-                    log.error(value[0].getErrorMessage())
-                    continue
-            newres[table] = value
+            if value and isinstance(value[0], Failure): newres[table] = []
+            else: newres[table] = value
         return newres
 
