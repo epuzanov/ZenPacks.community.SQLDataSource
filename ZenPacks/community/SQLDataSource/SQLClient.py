@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.4 2011/08/19 18:35:39 egor Exp $"""
+$Id: SQLClient.py,v 2.5 2011/08/31 19:09:24 egor Exp $"""
 
-__version__ = "$Revision: 2.4 $"[11:-2]
+__version__ = "$Revision: 2.5 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -121,7 +121,7 @@ class SQLClient(BaseClient):
             for instances in resMaps.values():
                 for tables in instances.values():
                     for table, props in tables:
-                        results[table] = [{}]
+                        results[table] = []
             return results
         header = [h[0].upper() for h in cursor.description]
         for row in (hasattr(cursor,'__iter__') and cursor or cursor.fetchall()):
@@ -143,17 +143,18 @@ class SQLClient(BaseClient):
                         if not hasattr(anames, '__iter__'): anames=(anames,)
                         for aname in anames:
                             result[aname] = rDict.get(name.upper(), None)
-                    results[table].append(result)
+                    if result: results[table].append(result)
         for kbVal in resMaps.values():
             for tables in kbVal.values():
                 for table, cols in tables:
                     if table in results: continue
+                    results[table] = []
                     result = {}
                     for name, anames in cols.iteritems():
                         val = self.parseValue(rows.get(name.upper(), None))
                         if not hasattr(anames, '__iter__'): anames=(anames,)
                         for aname in anames: result[aname] = val
-                    results[table] = [result]
+                    if result: results[table].append(result)
         return results
 
 
