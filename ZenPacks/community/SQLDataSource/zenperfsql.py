@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.2 2011/09/01 17:54:21 egor Exp $"""
+$Id: zenperfsql.py,v 2.3 2011/09/01 19:48:19 egor Exp $"""
 
-__version__ = "$Revision: 2.2 $"[11:-2]
+__version__ = "$Revision: 2.3 $"[11:-2]
 
 import logging
 from copy import copy
@@ -96,6 +96,17 @@ class ZenPerfSqlTaskSplitter(SimpleTaskSplitter):
         return (config.id, config.configCycleInterval,
                 md5.new(subconfig[0]).hexdigest())
 
+    def _newTask(self, name, configId, interval, config):
+        """
+        Handle the dirty work of creating a task
+        """
+        self._taskFactory.reset()
+        self._taskFactory.name = name
+        self._taskFactory.configId = configId
+        self._taskFactory.interval = interval
+        self._taskFactory.config = config
+        return self._taskFactory.build()
+
     def _splitSubConfiguration(self, config):
         subconfigs = {}
         for subconfig in getattr(config, self.subconfigName):
@@ -124,7 +135,7 @@ class ZenPerfSqlTaskSplitter(SimpleTaskSplitter):
                 setattr(configCopy, self.subconfigName, subconfigGroup)
 
                 tasks[name] = self._newTask(name,
-                                            name, # configId
+                                            configId,
                                             interval,
                                             configCopy)
         return tasks
@@ -170,8 +181,8 @@ class ZenPerfSqlTask(ObservableMixin):
     STATE_SQLC_PROCESS = 'SQLC_PROCESS'
 
     def __init__(self,
-                 deviceId,
                  taskName,
+                 deviceId,
                  scheduleIntervalSeconds,
                  taskConfig):
         """
