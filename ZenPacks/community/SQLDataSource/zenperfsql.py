@@ -12,11 +12,12 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.1 2011/06/09 20:18:38 egor Exp $"""
+$Id: zenperfsql.py,v 2.2 2011/09/01 17:54:21 egor Exp $"""
 
-__version__ = "$Revision: 2.1 $"[11:-2]
+__version__ = "$Revision: 2.2 $"[11:-2]
 
 import logging
+from copy import copy
 
 import Globals
 import zope.component
@@ -32,9 +33,9 @@ from Products.ZenCollector.interfaces import ICollectorPreferences,\
                                              IDataService,\
                                              IEventService,\
                                              IScheduledTask,\
-                                             IScheduledTaskFactory,\
-                                             ITaskSplitter
+                                             IScheduledTaskFactory
 from Products.ZenCollector.tasks import SimpleTaskFactory,\
+                                        SimpleTaskSplitter,\
                                         TaskStates
 from Products.ZenEvents.ZenEventClasses import Error, Clear
 from Products.ZenUtils.observable import ObservableMixin
@@ -84,74 +85,50 @@ def rrpn(expression, value):
         return value
 
 
-class ZenPerfSqlTaskSplitter(object):
+class ZenPerfSqlTaskSplitter(SimpleTaskSplitter):
     """
-    A task splitter that creates a single scheduled task for an entire 
-    configuration.
+    A task splitter that creates a single scheduled task by
+    device, cycletime and other criteria.
     """
-    zope.interface.implements(ITaskSplitter)
+    subconfigName = 'datapoints'
 
-    def __init__(self, taskFactory):
-        """
-        Creates a new instance of DeviceTaskSpliter.
-        @param taskClass the class to use when creating new tasks
-        @type any Python class
-        """
-        if not IScheduledTaskFactory.providedBy(taskFactory):
-            raise TypeError("taskFactory must implement IScheduledTaskFactory")
-        else:
-            self._taskFactory = taskFactory
+    def makeConfigKey(self, config, subconfig):
+        return (config.id, config.configCycleInterval,
+                md5.new(subconfig[0]).hexdigest())
+
+    def _splitSubConfiguration(self, config):
+        subconfigs = {}
+        for subconfig in getattr(config, self.subconfigName):
+            key = self.makeConfigKey(config, subconfig)
+            subconfigList = subconfigs.setdefault(key, [])
+            subconfigList.append(subconfig)
+        return subconfigs
 
     def splitConfiguration(self, configs):
+        # This name required by ITaskSplitter interface
         tasks = {}
         for config in configs:
-            log.debug("splitting config %r", config)
-            datapoints = config.datapoints
-            thresholds = config.thresholds
-            queries = {}
-            qIdx = {}
-            for tn, (sql,sqlp,kbs,cs,columns) in config.queries.iteritems():
-                table = (tn, columns)
-                ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
-                ival = tuple([str(v).strip().upper() \
-                                                for v in (kbs or {}).values()])
-                if cs not in queries:
-                    queries[cs] = {}
-                    qIdx[cs] = {}
-                if sqlp not in queries[cs]:
-                    if sqlp in qIdx[cs]:
-                        queries[cs][sqlp] = qIdx[cs][sqlp][1]
-                        del queries[cs][qIdx[cs][sqlp][0]]
-                    else:
-                        qIdx[cs][sqlp] = (sql, {ikey:{ival:[table]}})
-                        queries[cs][sql]={():{():[table]}}
-                        continue
-                if ikey not in queries[cs][sqlp]:
-                    queries[cs][sqlp][ikey] = {ival:[table]}
-                elif ival not in queries[cs][sqlp][ikey]:
-                    queries[cs][sqlp][ikey][ival] = [table]
-                else:
-                    queries[cs][sqlp][ikey][ival].append(table)
-            qIdx = None
-            del config.queries
-            del config.datapoints
-            del config.thresholds
-            for cs in queries.keys():
-                self._taskFactory.reset()
-                self._taskFactory.config = config
-                taskName = config.id + '_' + md5.new(cs).hexdigest()
-#                taskName = self._taskFactory.config.id
-                self._taskFactory.name = taskName
-                self._taskFactory.configId = taskName
-                self._taskFactory.interval = config.configCycleInterval
-                self._taskFactory.config.deviceId = config.id
-                self._taskFactory.config.queries = {cs:queries.get(cs, {})}
-                self._taskFactory.config.datapoints = datapoints.get(cs, [])
-                self._taskFactory.config.thresholds = thresholds.get(cs, [])
-                task = self._taskFactory.build()
+            log.debug("Splitting config %s", config)
 
-                tasks[taskName] = task
+            # Group all of the subtasks under the same configId
+            # so that updates clean up any previous tasks
+            # (including renames)
+            configId = config.id
+
+            subconfigs = self._splitSubConfiguration(config)
+            for key, subconfigGroup in subconfigs.items():
+                name = ' '.join(map(str, key))
+                interval = key[1]
+
+                configCopy = copy(config)
+                setattr(configCopy, self.subconfigName, subconfigGroup)
+
+                tasks[name] = self._newTask(name,
+                                            name, # configId
+                                            interval,
+                                            configCopy)
         return tasks
+
 
 # Create an implementation of the ICollectorPreferences interface so that the
 # ZenCollector framework can configure itself from our preferences.
@@ -193,15 +170,15 @@ class ZenPerfSqlTask(ObservableMixin):
     STATE_SQLC_PROCESS = 'SQLC_PROCESS'
 
     def __init__(self,
-                 configId,
+                 deviceId,
                  taskName,
                  scheduleIntervalSeconds,
                  taskConfig):
         """
         Construct a new task instance to get SQL data.
 
-        @param configId: the Zenoss configId to watch
-        @type configId: string
+        @param deviceId: the Zenoss deviceId to watch
+        @type deviceId: string
         @param taskName: the unique identifier for this task
         @type taskName: string
         @param scheduleIntervalSeconds: the interval at which this task will be
@@ -212,16 +189,15 @@ class ZenPerfSqlTask(ObservableMixin):
         super(ZenPerfSqlTask, self).__init__()
 
         self.name = taskName
-        self.configId = configId
+        self.configId = deviceId
         self.interval = scheduleIntervalSeconds
         self.state = TaskStates.STATE_IDLE
 
         self._taskConfig = taskConfig
-        self._devId = self._taskConfig.deviceId
+        self._devId = deviceId
         self._manageIp = self._taskConfig.manageIp
-        self._queries = self._taskConfig.queries
-        self._thresholds = self._taskConfig.thresholds
         self._datapoints = self._taskConfig.datapoints
+        self._thresholds = self._taskConfig.thresholds
 
         self._dataService = zope.component.queryUtility(IDataService)
         self._eventService = zope.component.queryUtility(IEventService)
@@ -316,13 +292,13 @@ class ZenPerfSqlTask(ObservableMixin):
         log.debug("Successful collection from %s [%s], results=%s",
                   self._devId, self._manageIp, results)
 
-        for q in self._queries.values():
-            ZenPerfSqlTask.QUERIES += len(q)
+#        for q in self._queries.values():
+#            ZenPerfSqlTask.QUERIES += len(q)
 
         if not results: return None
 #        compstatus = {self._monitor:{'':Clear}}
         compstatus = {}
-        for tn,dpname,comp,expr,rrdPath,rrdType,rrdC,minmax in self._datapoints:
+        for cs,tn,dpname,comp,expr,rrdPath,rrdType,rrdC,mm in self._datapoints:
             values = []
             if '/' not in tn: devId = self._monitor
             else: devId = tn.split('/')[0] or self._monitor
@@ -362,8 +338,8 @@ class ZenPerfSqlTask(ObservableMixin):
                                             float(value),
                                             rrdType,
                                             rrdC,
-                                            min=minmax[0],
-                                            max=minmax[1])
+                                            min=mm[0],
+                                            max=mm[1])
             except Exception, e:
                 compstatus[devId][comp] = Failure(e)
         self._sendEvents(compstatus)
@@ -381,7 +357,8 @@ class ZenPerfSqlTask(ObservableMixin):
 
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
         self._sqlc = SQLClient(self._taskConfig)
-        d = self._sqlc.sortedQuery(self._queries)
+        cs = self._datapoints[0][0]
+        d = self._sqlc.sortedQuery({cs: self._taskConfig.queries[cs]})
         d.addCallbacks(self._collectSuccessful, self._failure)
         return d
 
