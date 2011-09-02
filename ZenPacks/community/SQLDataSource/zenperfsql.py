@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.3 2011/09/01 19:48:19 egor Exp $"""
+$Id: zenperfsql.py,v 2.4 2011/09/02 17:47:43 egor Exp $"""
 
-__version__ = "$Revision: 2.3 $"[11:-2]
+__version__ = "$Revision: 2.4 $"[11:-2]
 
 import logging
 from copy import copy
@@ -84,17 +84,17 @@ def rrpn(expression, value):
     except:
         return value
 
-
-class ZenPerfSqlTaskSplitter(SimpleTaskSplitter):
+class SubConfigurationTaskSplitter(SimpleTaskSplitter):
     """
+    A drop-in replacement for original SubConfigurationTaskSplitter class.
     A task splitter that creates a single scheduled task by
     device, cycletime and other criteria.
     """
-    subconfigName = 'datapoints'
+
+    subconfigName = 'datasources'
 
     def makeConfigKey(self, config, subconfig):
-        return (config.id, config.configCycleInterval,
-                md5.new(subconfig[0]).hexdigest())
+        raise NotImplementedError("Required method not implemented")
 
     def _newTask(self, name, configId, interval, config):
         """
@@ -140,6 +140,16 @@ class ZenPerfSqlTaskSplitter(SimpleTaskSplitter):
                                             configCopy)
         return tasks
 
+class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
+    """
+    A task splitter that creates a single scheduled task by
+    device, cycletime and other criteria.
+    """
+    subconfigName = 'datapoints'
+
+    def makeConfigKey(self, config, subconfig):
+        return (config.id, config.configCycleInterval,
+                md5.new(subconfig[0]).hexdigest())
 
 # Create an implementation of the ICollectorPreferences interface so that the
 # ZenCollector framework can configure itself from our preferences.
