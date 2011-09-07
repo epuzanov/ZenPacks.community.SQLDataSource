@@ -20,12 +20,13 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.6'
+__version__ = '2.0.7'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
 from datetime import datetime, timedelta
-import threading
+# import threading
+from distutils.version import StrictVersion
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
@@ -542,7 +543,7 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._lock = threading.RLock()
+#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
@@ -576,6 +577,8 @@ class pywbemCnx:
                     'CIMObject': self._namespace}
 
         request = urllib2.Request(self._url, data, headers)
+        if StrictVersion(urllib2.__version__) < '2.6':
+            request.set_proxy = lambda *args: None
 
         tryLimit = 5
         xml_repl = None
@@ -615,7 +618,7 @@ class pywbemCnx:
             except: cursor._keybindings.clear()
         if props == '*': cursor._props = []
         else: cursor._props = [p for p in props.replace(' ','').split(',')]
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 if self._dialect:
@@ -643,7 +646,8 @@ class pywbemCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
     def _fetchone(self, cursor):
         """Fetches a single row from the cursor rows cache. None indicates that

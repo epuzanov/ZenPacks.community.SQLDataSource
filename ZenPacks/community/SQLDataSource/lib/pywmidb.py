@@ -20,11 +20,12 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.3.1'
+__version__ = '1.3.2'
 
-import threading
+#import threading
 import sys
 from datetime import datetime, timedelta
+from distutils.version import StrictVersion
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -80,6 +81,7 @@ else:
     from pysamba.wbem.wbem import *
     from pysamba.talloc import *
     from pysamba.rpc.credentials import CRED_SPECIFIED
+    from pysamba.version import VERSION as PSVERSION
 
     library.dcom_client_init.restype = c_void_p
     library.dcom_client_init.argtypes = [POINTER(com_context), c_void_p]
@@ -87,6 +89,13 @@ else:
     library.IWbemServices_ExecQuery.restype = WERROR
     library.IEnumWbemClassObject_Reset.restype = WERROR
     library.IUnknown_Release.restype = WERROR
+
+    if StrictVersion(PSVERSION) < '1.3.10':
+        library.WBEM_ConnectServer.restype = WERROR
+        library.IEnumWbemClassObject_SmartNext.restype = WERROR
+        class IEnumWbemClassObject(Structure): pass
+        class IWbemClassObject(Structure): pass
+        class IWbemContext(Structure): pass
 
     WbemQualifier._fields_ = [
         ('name', CIMSTRING),
@@ -377,7 +386,7 @@ class pysambaCnx:
     """
 
     def __init__(self, *args, **kwargs):
-        self._lock = threading.RLock()
+#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
@@ -468,7 +477,7 @@ class pysambaCnx:
         """
         if self._ctx is None:
             raise InterfaceError, "Connection closed."
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 pEnum = POINTER(IEnumWbemClassObject)()
@@ -585,7 +594,7 @@ class pysambaCnx:
             pEnum = None
             objs = None
             count = None
-            self._lock.release()
+#            self._lock.release()
 
 
     def __del__(self):
@@ -632,7 +641,7 @@ class win32comCnx:
     This class represent an WMI Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._lock = threading.RLock()
+#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._ctx = None
         self._swl = None
@@ -667,7 +676,7 @@ class win32comCnx:
         """
         if self._ctx is None:
             raise InterfaceError, "Connection closed."
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 props, classname, where = WQLPAT.match(query).groups('')
@@ -718,7 +727,8 @@ class win32comCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
     def __del__(self):
         self.close()

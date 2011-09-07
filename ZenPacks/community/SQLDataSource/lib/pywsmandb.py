@@ -20,14 +20,15 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.7'
+__version__ = '2.0.8'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
 except: import uuid
 import httplib, urllib2
 from datetime import datetime, timedelta
-import threading
+#import threading
+from distutils.version import StrictVersion
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
@@ -609,7 +610,7 @@ class wsmanCnx:
     This class represent an WS-Management Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._lock = threading.RLock()
+#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'http')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))
@@ -660,6 +661,8 @@ class wsmanCnx:
             headers['SOAPAction'] = action
 
         request = urllib2.Request(self._url, data, headers)
+        if StrictVersion(urllib2.__version__) < '2.6':
+            request.set_proxy = lambda *args: None
 
         tryLimit = 5
         xml_repl = None
@@ -700,7 +703,7 @@ class wsmanCnx:
             except: cursor._selectors.clear()
         if props == '*': cursor._props = []
         else:cursor._props=[p for p in set(props.replace(' ','').split(','))]
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 if self._wsm_vendor == 'Microsoft':
@@ -749,11 +752,12 @@ class wsmanCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
 
     def _fetchone(self, cursor):
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 while not cursor._rows and cursor._enumCtx:
@@ -770,12 +774,13 @@ class wsmanCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
 
     def _release(self, cursor):
         if not cursor._enumCtx: return
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
@@ -789,7 +794,8 @@ class wsmanCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
     def __del__(self):
         self.close()

@@ -20,10 +20,10 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import datetime
-import threading
+# import threading
 import subprocess
 import os
 import re
@@ -99,7 +99,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module may be shared, but not connections
-threadsafety = 2
+threadsafety = 1
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -319,7 +319,7 @@ class isqlCnx:
         if uid:
             self._args.insert(2, uid)
             if pwd: self._args.insert(3, pwd)
-        self._lock = threading.RLock()
+#        self._lock = threading.RLock()
 
 
     def __del__(self):
@@ -353,7 +353,7 @@ class isqlCnx:
         rows = []
         tCount = 0
         cMap = []
-        self._lock.acquire()
+#        self._lock.acquire()
         try:
             try:
                 p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
@@ -406,7 +406,8 @@ class isqlCnx:
             except Exception, e:
                 raise OperationalError, e
         finally:
-            self._lock.release()
+            pass
+#            self._lock.release()
 
 
     def _fetchone(self, cursor):
