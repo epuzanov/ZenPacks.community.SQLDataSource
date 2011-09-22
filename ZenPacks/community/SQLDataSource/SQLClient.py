@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.5 2011/08/31 19:09:24 egor Exp $"""
+$Id: SQLClient.py,v 2.6 2011/09/14 23:10:40 egor Exp $"""
 
-__version__ = "$Revision: 2.5 $"[11:-2]
+__version__ = "$Revision: 2.6 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -200,7 +200,9 @@ class SQLClient(BaseClient):
         results = {}
         for cs, qs in self.sortQueries(tasks).iteritems():
             args, kwargs = self.parseCS(cs)
-            dbapi = __import__(args[0], globals(), locals(), '')
+            fl = []
+            if '.' in args[0]: fl.append(args[0].split('.')[-1])
+            dbapi = __import__(args[0], globals(), locals(), fl)
             connection = dbapi.connect(*args[1:], **kwargs)
             dbcursor = connection.cursor()
             for sql, resMaps in qs.iteritems():

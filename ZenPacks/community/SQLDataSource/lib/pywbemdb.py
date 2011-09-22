@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.7'
+__version__ = '2.0.8'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -262,6 +262,8 @@ class CIMHandler(handler.ContentHandler):
         self._in=['IRETURNVALUE','IMETHODRESPONSE','SIMPLERSP','MESSAGE','CIM']
         self._cur = cursor
         self._qName = ''
+        self._rName = ''
+        self._rClass = ''
         self._pName = ''
         self._pType = ''
         self._pVal = []
@@ -271,8 +273,7 @@ class CIMHandler(handler.ContentHandler):
 
 
     def startElement(self, name, attrs):
-        if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
-            'VALUE'): return
+        if name in ('VALUE.ARRAY', 'VALUE.REFERENCE', 'VALUE'): return
         if self._in:
             tag = self._in.pop()
             if name == tag:
@@ -308,9 +309,17 @@ class CIMHandler(handler.ContentHandler):
         elif name == 'INSTANCE':
             if not self._cur.description: self._cur.description = []
         elif name == 'INSTANCENAME':
-            self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
-            self._pdict['__NAMESPACE'] = self._cur.connection._namespace
-
+            if not self._rName:
+                self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
+                self._pdict['__NAMESPACE'] = self._cur.connection._namespace
+        elif name == 'PROPERTY.REFERENCE':
+            self._rName = str(attrs._attrs.get('NAME', ''))
+            self._rClass = str(attrs._attrs.get('REFERENCECLASS', ''))
+            self._pType = CIM_STRING
+            del self._pVal[:]
+            if type(self._cur.description) is tuple: return
+            self._cur.description.append((self._pName,
+                                    self._pType, None, None, None, None, None))
 
     def characters(self, content):
         if not content.strip(): return
@@ -322,8 +331,7 @@ class CIMHandler(handler.ContentHandler):
 
 
     def endElement(self, name):
-        if name in ('PROPERTY.REFERENCE', 'VALUE.ARRAY', 'VALUE.REFERENCE',
-            'VALUE', 'KEYVALUE'): return
+        if name in ('VALUE.ARRAY','VALUE.REFERENCE','VALUE','KEYVALUE'): return
         if name == 'PROPERTY':
             if len(self._pVal) == 1:
                 self._pdict[self._pName.upper()] = self._pVal[0]
@@ -342,6 +350,12 @@ class CIMHandler(handler.ContentHandler):
                 self._kbs.append('%s="%s"'%(self._pName, self._pVal[0]))
             else:
                 self._kbs.append('%s=%s'%(self._pName, self._pVal[0]))
+        elif name == 'PROPERTY.REFERENCE':
+            self._pdict[self._rName.upper()] = '%s.%s'%(self._rClass,
+                                                            ','.join(self._kbs))
+            self._rName = ''
+            del self._kbs[:]
+            del self._pVal[:]
         elif name == 'INSTANCE':
             if type(self._cur.description) is list:
                 if self._cur._props:
@@ -360,9 +374,11 @@ class CIMHandler(handler.ContentHandler):
                         p[0].upper(), None) for p in self._cur.description]))
             self._pdict.clear()
         elif name == 'INSTANCENAME':
-            self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
-                                            ','.join(self._kbs))
-            del self._kbs[:]
+            if not self._rName:
+                self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
+                                                            ','.join(self._kbs))
+                del self._kbs[:]
+        
 
 
 ### HTTPSClientAuthHandler object
@@ -586,10 +602,12 @@ class pywbemCnx:
             tryLimit -= 1
             try:
                 xml_repl = self._urlOpener.open(request)
+#                print xml_repl.read()
             except urllib2.HTTPError, arg:
                 if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('HTTP error: %s' % arg.code)
             except urllib2.URLError, arg:
+                raise
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
         return xml_repl

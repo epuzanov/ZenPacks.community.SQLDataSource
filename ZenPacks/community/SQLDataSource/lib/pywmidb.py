@@ -20,9 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.3.2'
+__version__ = '1.3.3'
 
-#import threading
+import threading
 import sys
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -386,7 +386,7 @@ class pysambaCnx:
     """
 
     def __init__(self, *args, **kwargs):
-#        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         self._host = kwargs.get('host', 'localhost')
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
@@ -477,7 +477,7 @@ class pysambaCnx:
         """
         if self._ctx is None:
             raise InterfaceError, "Connection closed."
-#        self._lock.acquire()
+        self._lock.acquire()
         try:
             try:
                 pEnum = POINTER(IEnumWbemClassObject)()
@@ -594,7 +594,7 @@ class pysambaCnx:
             pEnum = None
             objs = None
             count = None
-#            self._lock.release()
+            self._lock.release()
 
 
     def __del__(self):
@@ -641,7 +641,7 @@ class win32comCnx:
     This class represent an WMI Connection connection.
     """
     def __init__(self, *args, **kwargs):
-#        self._lock = threading.RLock()
+#        self._lock = threading.Lock()
         self._host = kwargs.get('host', 'localhost')
         self._ctx = None
         self._swl = None
