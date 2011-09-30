@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.8'
+__version__ = '2.0.9'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -309,7 +309,9 @@ class CIMHandler(handler.ContentHandler):
         elif name == 'INSTANCE':
             if not self._cur.description: self._cur.description = []
         elif name == 'INSTANCENAME':
-            if not self._rName:
+            if self._rName:
+                self._rClass = str(attrs._attrs.get('CLASSNAME', ''))
+            else:
                 self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
                 self._pdict['__NAMESPACE'] = self._cur.connection._namespace
         elif name == 'PROPERTY.REFERENCE':
@@ -331,7 +333,8 @@ class CIMHandler(handler.ContentHandler):
 
 
     def endElement(self, name):
-        if name in ('VALUE.ARRAY','VALUE.REFERENCE','VALUE','KEYVALUE'): return
+        if name in ('VALUE.ARRAY','VALUE.REFERENCE','VALUE','KEYVALUE',
+                                                'PROPERTY.REFERENCE'): return
         if name == 'PROPERTY':
             if len(self._pVal) == 1:
                 self._pdict[self._pName.upper()] = self._pVal[0]
@@ -350,12 +353,6 @@ class CIMHandler(handler.ContentHandler):
                 self._kbs.append('%s="%s"'%(self._pName, self._pVal[0]))
             else:
                 self._kbs.append('%s=%s'%(self._pName, self._pVal[0]))
-        elif name == 'PROPERTY.REFERENCE':
-            self._pdict[self._rName.upper()] = '%s.%s'%(self._rClass,
-                                                            ','.join(self._kbs))
-            self._rName = ''
-            del self._kbs[:]
-            del self._pVal[:]
         elif name == 'INSTANCE':
             if type(self._cur.description) is list:
                 if self._cur._props:
@@ -374,11 +371,15 @@ class CIMHandler(handler.ContentHandler):
                         p[0].upper(), None) for p in self._cur.description]))
             self._pdict.clear()
         elif name == 'INSTANCENAME':
-            if not self._rName:
+            if self._rName:
+                self._pdict[self._rName.upper()] = '%s.%s'%(self._rClass,
+                                                            ','.join(self._kbs))
+                self._rName = ''
+                del self._pVal[:]
+            else:
                 self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
                                                             ','.join(self._kbs))
-                del self._kbs[:]
-        
+            del self._kbs[:]
 
 
 ### HTTPSClientAuthHandler object
