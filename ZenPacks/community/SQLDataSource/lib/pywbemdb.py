@@ -20,12 +20,11 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.9'
+__version__ = '2.1.0'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
 from datetime import datetime, timedelta
-# import threading
 from distutils.version import StrictVersion
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -34,7 +33,8 @@ DTPAT = re.compile(r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+|-]\
 TDPAT = re.compile(r'^(\d{8})(\d{2})(\d{2})(\d{2})\.(\d{6})')
 
 
-XML_REQ = """<CIM CIMVERSION="2.0" DTDVERSION="2.0">
+XML_REQ = """<?xml version="1.0" encoding="utf-8" ?>
+<CIM CIMVERSION="2.0" DTDVERSION="2.0">
 <MESSAGE ID="1001" PROTOCOLVERSION="1.0">
 <SIMPLEREQ>
 <IMETHODCALL NAME="%s">
@@ -132,7 +132,7 @@ TYPEFUNCT = {CIM_UINT8: int, CIM_UINT16: int, CIM_UINT32: int, CIM_UINT64: long,
             CIM_SINT8: int, CIM_SINT16: int, CIM_SINT32: int, CIM_SINT64: long,
             CIM_REAL32: float, CIM_REAL64: float, CIM_STRING: str,
             CIM_CHAR16: str, CIM_OBJECT: str, CIM_REFERENCE: str,
-            CIM_BOOLEAN: (lambda v: v.lower() is 'true'),
+            CIM_BOOLEAN: lambda v: str(v).lower() == 'true',
             CIM_DATETIME: _datetime}
 
 
@@ -309,9 +309,7 @@ class CIMHandler(handler.ContentHandler):
         elif name == 'INSTANCE':
             if not self._cur.description: self._cur.description = []
         elif name == 'INSTANCENAME':
-            if self._rName:
-                self._rClass = str(attrs._attrs.get('CLASSNAME', ''))
-            else:
+            if not self._rName:
                 self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
                 self._pdict['__NAMESPACE'] = self._cur.connection._namespace
         elif name == 'PROPERTY.REFERENCE':
@@ -322,6 +320,7 @@ class CIMHandler(handler.ContentHandler):
             if type(self._cur.description) is tuple: return
             self._cur.description.append((self._pName,
                                     self._pType, None, None, None, None, None))
+            
 
     def characters(self, content):
         if not content.strip(): return
@@ -333,15 +332,14 @@ class CIMHandler(handler.ContentHandler):
 
 
     def endElement(self, name):
-        if name in ('VALUE.ARRAY','VALUE.REFERENCE','VALUE','KEYVALUE',
-                                                'PROPERTY.REFERENCE'): return
+        if name in ('VALUE.ARRAY','VALUE.REFERENCE','VALUE','KEYVALUE'): return
         if name == 'PROPERTY':
             if len(self._pVal) == 1:
                 self._pdict[self._pName.upper()] = self._pVal[0]
             elif not self._pVal:
                 self._pdict[self._pName.upper()] = None
             elif len(self._pVal) > 1 and self._pType == STRING:
-                self._pdict[self._pName.upper()] = '\n'.join(self._pVal)
+                self._pdict[self._pName.upper()]='\n'.join(map(str,self._pVal))
             else:
                 self._pdict[self._pName.upper()] = self._pVal[0]
             del self._pVal[:]
@@ -353,6 +351,12 @@ class CIMHandler(handler.ContentHandler):
                 self._kbs.append('%s="%s"'%(self._pName, self._pVal[0]))
             else:
                 self._kbs.append('%s=%s'%(self._pName, self._pVal[0]))
+        elif name == 'PROPERTY.REFERENCE':
+            self._pdict[self._rName.upper()] = '%s.%s'%(self._rClass,
+                                                            ','.join(self._kbs))
+            self._rName = ''
+            del self._kbs[:]
+            del self._pVal[:]
         elif name == 'INSTANCE':
             if type(self._cur.description) is list:
                 if self._cur._props:
@@ -371,15 +375,11 @@ class CIMHandler(handler.ContentHandler):
                         p[0].upper(), None) for p in self._cur.description]))
             self._pdict.clear()
         elif name == 'INSTANCENAME':
-            if self._rName:
-                self._pdict[self._rName.upper()] = '%s.%s'%(self._rClass,
-                                                            ','.join(self._kbs))
-                self._rName = ''
-                del self._pVal[:]
-            else:
+            if not self._rName:
                 self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
                                                             ','.join(self._kbs))
-            del self._kbs[:]
+                del self._kbs[:]
+        
 
 
 ### HTTPSClientAuthHandler object
@@ -415,6 +415,7 @@ class wbemCursor(object):
         self._props = []
         self._keybindings = {}
         self._methodname = ''
+        self._xml_repl = None
         self._parser = make_parser()
         self._parser.setContentHandler(CIMHandler(self))
 
@@ -429,9 +430,9 @@ class wbemCursor(object):
 
     def _check_executed(self):
         if not self.connection:
-            raise InterfaceError, "Connection closed."
+            raise InterfaceError("Connection closed.")
         if not self.description:
-            raise OperationalError, "No data available. execute() first."
+            raise OperationalError("No data available. execute() first.")
 
     def __del__(self):
         self.close()
@@ -443,6 +444,7 @@ class wbemCursor(object):
         self.description = None
         self.connection = None
         self._parser = None
+        self._xml_repl = None
 
     def execute(self, operation, *args):
         """
@@ -456,29 +458,65 @@ class wbemCursor(object):
         guidelines.
         """
         if not self.connection:
-            raise InterfaceError, "Connection closed."
+            raise InterfaceError("Connection closed.")
         self.description = None
+        self._xml_repl = None
         self.rownumber = -1
         del self._rows[:]
+        self._keybindings.clear()
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
 
         if (args != () and len(args) != 1):
-            raise TypeError, "execute takes 1 or 2 arguments (%d given)" % (len(args) + 1,)
+            raise TypeError("execute takes 1 or 2 arguments (%d given)"%(
+                                                                len(args) + 1))
 
         if args != ():
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation.replace('\\', '\\\\'
-                                                    ).replace('\\\\"', '\\"'))
+            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
+                                        ).replace('\\\\"', '\\"')).groups('')
+        except:
+            raise ProgrammingError("Syntax error in the query statement.")
+        if where:
+            try:
+                self._keybindings.update(
+                    eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
+                    )
+                if [v for v in self._keybindings.values() if type(v) is list]:
+                    kbkeys = ''
+                    if props != '*':
+                        kbkeys = ',%s'%','.join(self._keybindings.keys())
+                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
+                elif self.connection._dialect: self._keybindings.clear()
+            except: self._keybindings.clear()
+        if props == '*': self._props = []
+        else: self._props = [p for p in props.replace(' ','').split(',')]
+        try:
+            if self.connection._dialect:
+                self._methodname = 'ExecQuery'
+                self._xml_repl = self.connection._wbem_request(self._methodname,
+                        EXECQUERY_IPARAM%(query, self.connection._dialect))
+            else:
+                self._methodname = 'EnumerateInstances'
+                pLst = [p for p in set(self._props) \
+                    if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
+                pLst.extend(self._keybindings.keys())
+                self._xml_repl = self.connection._wbem_request(self._methodname,
+                    ''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
+                    pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')
+                    ))
+            self._parser.parse(self._xml_repl)
             if self.description: self.rownumber = 0
 
-        except OperationalError, e:
-            raise OperationalError, e
         except InterfaceError, e:
-            raise InterfaceError, e
+            raise InterfaceError(e)
+        except OperationalError, e:
+            raise OperationalError(e)
+        except Exception, e:
+            raise OperationalError(e)
 
     def executemany(self, operation, param_seq):
         """
@@ -502,34 +540,35 @@ class wbemCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        return self.connection._fetchone(self)
+        if not self._rows: return None
+        self.rownumber += 1
+        return self._rows.pop(0)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if not size: size = self.arraysize
+        if size: size += self.rownumber
+        else: size = self.arraysize + self.rownumber
         results = []
-        while size and row:
-            results.append(row)
-            size -= 1
-            if size: row = self.connection._fetchone(self)
+        while self._rows and self.rownumber < size:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
         return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
         results = []
-        row = self.connection._fetchone(self)
-        while row:
-            results.append(row)
-            row = self.connection._fetchone(self)
+        while self._rows:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
         return results
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        row = self.connection._fetchone(self)
+        row = self.fetchone(self)
         if not row: raise StopIteration
         return row
 
@@ -560,7 +599,6 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
@@ -580,12 +618,13 @@ class pywbemCnx:
             self._urlOpener.add_handler(sslauthhandler)
 
 
-    def _wbem_request(self, methodname, data):
+    def _wbem_request(self, methodname, params):
         """Send XML data over HTTP to the specified url. Return the
         response in XML.  Uses Python's build-in urllib2.
         """
 
-        data = '<?xml version="1.0" encoding="utf-8" ?>\n%s'%data
+        data = XML_REQ%(methodname,
+            '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')), params)
 
         headers = { 'Content-type': 'application/xml; charset="utf-8"',
                     'Content-length': len(data),
@@ -603,78 +642,14 @@ class pywbemCnx:
             tryLimit -= 1
             try:
                 xml_repl = self._urlOpener.open(request)
-#                print xml_repl.read()
             except urllib2.HTTPError, arg:
                 if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('HTTP error: %s' % arg.code)
             except urllib2.URLError, arg:
-                raise
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
         return xml_repl
 
-
-    def _execute(self, cursor, query):
-        """
-        Execute Query
-        """
-        try:
-            props, classname, where = WQLPAT.match(query).groups('')
-        except:
-            raise ProgrammingError, "Syntax error in the query statement."
-        cursor._keybindings.clear()
-        if where:
-            try:
-                cursor._keybindings.update(
-                    eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
-                    )
-                if [v for v in cursor._keybindings.values() if type(v) is list]:
-                    kbkeys = ''
-                    if props != '*':
-                        kbkeys = ',%s'%','.join(cursor._keybindings.keys())
-                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
-                elif self._dialect: cursor._keybindings.clear()
-            except: cursor._keybindings.clear()
-        if props == '*': cursor._props = []
-        else: cursor._props = [p for p in props.replace(' ','').split(',')]
-#        self._lock.acquire()
-        try:
-            try:
-                if self._dialect:
-                    method = 'ExecQuery'
-                    cursor._methodname = method
-                    xml_repl = self._wbem_request(method, XML_REQ%(method,
-                        '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
-                        ), EXECQUERY_IPARAM%(query, self._dialect)))
-                else:
-                    method = 'EnumerateInstances'
-                    cursor._methodname = method
-                    pLst = [p for p in set(cursor._props) \
-                        if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
-                    pLst.extend(cursor._keybindings.keys())
-                    xml_repl = self._wbem_request(method, XML_REQ%(method,
-                        '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')
-                        ),''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
-                        pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')
-                        )))
-                cursor._parser.parse(xml_repl)
-            except InterfaceError, e:
-                raise InterfaceError, e
-            except OperationalError, e:
-                raise OperationalError, e
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            pass
-#            self._lock.release()
-
-    def _fetchone(self, cursor):
-        """Fetches a single row from the cursor rows cache. None indicates that
-        no more rows are available."""
-        if cursor._rows:
-            cursor.rownumber += 1
-            return cursor._rows.pop(0)
-        else: return None
 
     def __del__(self):
         self.close()
