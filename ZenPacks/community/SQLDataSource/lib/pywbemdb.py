@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.1'
+__version__ = '2.1.3'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -214,7 +214,7 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared, but not connections
+# module and connections may be shared
 threadsafety = 2
 
 # this module use extended python format codes
@@ -490,7 +490,7 @@ class wbemCursor(object):
                     kbkeys = ''
                     if props != '*':
                         kbkeys = ',%s'%','.join(self._keybindings.keys())
-                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
+                    operation = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
                 elif self.connection._dialect: self._keybindings.clear()
             except: self._keybindings.clear()
         if props == '*': self._props = []
@@ -499,7 +499,7 @@ class wbemCursor(object):
             if self.connection._dialect:
                 self._methodname = 'ExecQuery'
                 self._xml_repl = self.connection._wbem_request(self._methodname,
-                        EXECQUERY_IPARAM%(query, self.connection._dialect))
+                        EXECQUERY_IPARAM%(operation, self.connection._dialect))
             else:
                 self._methodname = 'EnumerateInstances'
                 pLst = [p for p in set(self._props) \
@@ -569,7 +569,7 @@ class wbemCursor(object):
     def next(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        row = self.fetchone(self)
+        row = self.fetchone()
         if not row: raise StopIteration
         return row
 

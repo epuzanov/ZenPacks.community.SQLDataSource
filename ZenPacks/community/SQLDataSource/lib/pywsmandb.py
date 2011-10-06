@@ -20,14 +20,13 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.0.8'
+__version__ = '2.1.0'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
 except: import uuid
 import httplib, urllib2
 from datetime import datetime, timedelta
-#import threading
 from distutils.version import StrictVersion
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -51,8 +50,28 @@ ENUM_ACTION_RELEASE = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Release
 WSM_WQL_FILTER_DIALECT = "http://schemas.microsoft.com/wbem/wsman/1/WQL"
 WSM_CQL_FILTER_DIALECT = "http://schemas.dmtf.org/wbem/cql/1/dsp0202.pdf"
 
+WQL_FILTER_TMPL = '\n<wsman:Filter Dialect="http://schemas.microsoft.com/wbem/wsman/1/WQL">%s</wsman:Filter>'
+CQL_FILTER_TMPL = '\n<wsman:Filter Dialect="http://schemas.dmtf.org/wbem/cql/1/dsp0202.pdf">%s</wsman:Filter>'
 
-INTR_REQ = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:n1="http://schemas.openwsman.org/wbem/wscim/1/intrinsic/%s">
+ENUM_TMPL = """<wsen:Enumerate>
+<wsman:EnumerationMode>EnumerateObjectAndEPR</wsman:EnumerationMode>%s
+</wsen:Enumerate>"""
+PULL_TMPL = """<wsen:Pull>
+<wsen:EnumerationContext>%s</wsen:EnumerationContext>
+</wsen:Pull>"""
+RELEASE_TMPL = """<wsen:Release>
+<wsen:EnumerationContext>%s</wsen:EnumerationContext>
+</wsen:Release>"""
+
+IDENT_REQ = """<?xml version="1.0" encoding="utf-8" ?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsmid="http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd">
+<s:Header/>
+<s:Body>
+<wsmid:Identify/>
+</s:Body>
+</s:Envelope>"""
+INTR_REQ = """<?xml version="1.0" encoding="utf-8" ?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:n1="http://schemas.openwsman.org/wbem/wscim/1/intrinsic/%s">
 <s:Header>
 <wsa:Action s:mustUnderstand="true">http://schemas.openwsman.org/wbem/wscim/1/intrinsic/%s/GetClass</wsa:Action>
 <wsa:To s:mustUnderstand="true">%s</wsa:To>
@@ -66,7 +85,8 @@ INTR_REQ = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmln
 <n1:GetClass_INPUT/>
 </s:Body>
 </s:Envelope>"""
-XML_REQ = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
+XML_REQ = """<?xml version="1.0" encoding="utf-8" ?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
 <s:Header>
 <wsa:Action s:mustUnderstand="true">%s</wsa:Action>
 <wsa:To s:mustUnderstand="true">%s</wsa:To>
@@ -142,7 +162,7 @@ TYPEFUNCT = {CIM_UINT8: int, CIM_UINT16: int, CIM_UINT32: int, CIM_UINT64: long,
             CIM_SINT8: int, CIM_SINT16: int, CIM_SINT32: int, CIM_SINT64: long,
             CIM_REAL32: float, CIM_REAL64: float, CIM_STRING: str,
             CIM_CHAR16: str, CIM_OBJECT: str, CIM_REFERENCE: str,
-            CIM_BOOLEAN: (lambda v: v.lower() is 'true'),
+            CIM_BOOLEAN: lambda v: str(v).lower() == 'true',
             CIM_DATETIME: _datetime}
 
 class DBAPITypeObject:
@@ -222,7 +242,7 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared, but not connections
+# module and connections may be shared
 threadsafety = 2
 
 # this module use extended python format codes
@@ -306,6 +326,8 @@ class WSMHandler(handler.ContentHandler):
         if name[0] in set((XML_NS_SOAP_1_2, XML_NS_ADDRESSING)): return
         if name == (XML_NS_WS_MAN, "Selector"):
             self._selectors.append(attrs._attrs.get((None,'Name'),name[1]))
+        elif name == (XML_NS_WS_MAN, "SelectorSet"):
+            del self._selectors[:]
         elif self._tag == 'Item': self._tag = name
         elif self._tag: self._pVal = ''
         elif name == (XML_NS_WS_MAN, "Item"): self._tag = 'Item'
@@ -319,17 +341,10 @@ class WSMHandler(handler.ContentHandler):
 #        if name[0] in set((XML_NS_SOAP_1_2, XML_NS_ADDRESSING)): return
         if self._tag == name:
             self._tag = None
-        elif self._tag:
-            if self._cur.description: pName = str(name[1]).upper()
-            else: pName = str(name[1])
-            if pName not in self._pdict:
-                self._pdict[pName] = self._pVal
-            elif type(self._pdict[pName]) is list:
-                self._pdict[pName].append(self._pVal)
-            else:
-                self._pdict[pName] = [self._pdict[pName], self._pVal]
         elif name == (XML_NS_WS_MAN, "Selector"):
-            self._selectors.append('%s="%s"'%(self._selectors.pop(),self._pVal))
+            sname = self._selectors.pop()
+            if sname != '__cimnamespace':
+                self._selectors.append('%s="%s"'%(sname, self._pVal))
         elif name == (XML_NS_ENUMERATION, "EnumerationContext"):
             self._cur._enumCtx = self._pVal
         elif name == (XML_NS_WS_MAN, "ResourceURI"):
@@ -338,7 +353,17 @@ class WSMHandler(handler.ContentHandler):
         elif name == (XML_NS_WS_MAN, "SelectorSet"):
             self._pdict['__PATH'] = '%s.%s'%(self._pdict['__CLASS'],
                                             ','.join(self._selectors))
-            del self._selectors[:]
+        elif self._tag:
+            if self._cur.description: pName = str(name[1]).upper()
+            else: pName = str(name[1])
+            if '__PATH' in self._pdict:
+                self._pVal = self._pdict['__PATH']
+            if pName not in self._pdict:
+                self._pdict[pName] = self._pVal
+            elif type(self._pdict[pName]) is list:
+                self._pdict[pName].append(self._pVal)
+            else:
+                self._pdict[pName] = [self._pdict[pName], self._pVal]
         elif name == (XML_NS_WS_MAN, "Item"):
             if not self._cur.description:
                 if self._cur._props: props = self._cur._props
@@ -450,6 +475,8 @@ class wsmanCursor(object):
         self.description = None
         self.rownumber = -1
         self.arraysize = 1
+        self._namespace = connection._namespace
+        self._wsm_vendor = connection._wsm_vendor
         self._uri = ''
         self._enumCtx = None
         self._props = []
@@ -474,9 +501,9 @@ class wsmanCursor(object):
 
     def _check_executed(self):
         if not self.connection:
-            raise InterfaceError, "Connection closed."
+            raise InterfaceError("Connection closed.")
         if not self.description:
-            raise OperationalError, "No data available. execute() first."
+            raise OperationalError("No data available. execute() first.")
 
     def __del__(self):
         self.close()
@@ -505,28 +532,69 @@ class wsmanCursor(object):
         guidelines.
         """
         if not self.connection:
-            raise InterfaceError, "Connection closed."
+            raise InterfaceError("Connection closed.")
         self.description = None
         self.rownumber = -1
+        self._selectors.clear()
+        if self._enumCtx:
+            try: self.connection._release(self._uri, self._enumCtx)
+            finally: self._enumCtx = None
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
 
         if (args != () and len(args) != 1):
-            raise TypeError, "execute takes 1 or 2 arguments (%d given)" % (len(args) + 1,)
+            raise TypeError("execute takes 1 or 2 arguments (%d given)"%(
+                                                                len(args) + 1))
 
         if args != ():
             operation = operation%args[0]
 
         try:
-            self.connection._execute(self, operation.replace('\\', '\\\\'
-                                                    ).replace('\\\\"', '\\"'))
+            props, classname, where = WQLPAT.match(operation.replace('\\', '\\\\'
+                                                    ).replace('\\\\"', '\\"')).groups('')
+        except:
+            raise ProgrammingError("Syntax error in the query statement.")
+        if where:
+            try:
+                self._selectors.update(
+                    eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
+                    )
+                if [v for v in self._selectors.values() if type(v) is list]:
+                    kbkeys = ''
+                    if props != '*':
+                        kbkeys = ',%s'%','.join(cursor._selectors.keys())
+                    operation = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
+                elif self.connection._fltr: self._selectors.clear()
+            except: self._selectors.clear()
+        if props == '*': self._props = []
+        else: self._props=[p for p in set(props.replace(' ','').split(','))]
+        try:
+            if self._wsm_vendor == 'Microsoft':
+                classname = '*'
+            elif self._wsm_vendor == 'Openwsman':
+                self._iparser.parse(self.connection._getClass(classname))
+            if not self._namespace.startswith('http'):
+                self._uri = '/'.join(({ 'CIM': XML_NS_CIM_CLASS,
+                    'OpenWBEM': XML_NS_OWBEM_CIM_CLASS,
+                    'Linux': XML_NS_LINUX_CIM_CLASS,
+                    'OMC': XML_NS_OMC_CIM_CLASS,
+                    'PG': XML_NS_PG_CIM_CLASS,
+                    '*': '/'.join((XML_NS_WIN32_CIM_CLASS, self._namespace)),
+                    'Win32': '/'.join((XML_NS_WIN32_CIM_CLASS,self._namespace)),
+                    }.get(classname.split('_', 1)[0],
+                    XML_NS_CIM_CLASS), classname))
+            else: self._uri = '/'.join((self._namespace, classname))
+            self._parser.parse(self.connection._enumerate(self._uri, operation))
+            if not self._enumCtx: return
+            self._parser.parse(self.connection._pull(self._uri, self._enumCtx))
             if self.description: self.rownumber = 0
-
-        except OperationalError, e:
-            raise OperationalError, e
         except InterfaceError, e:
-            raise InterfaceError, e
+            raise InterfaceError(e)
+        except OperationalError, e:
+            raise OperationalError(e)
+        except Exception, e:
+            raise OperationalError(e)
 
     def executemany(self, operation, param_seq):
         """
@@ -550,7 +618,17 @@ class wsmanCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        return self.connection._fetchone(self)
+        try:
+            if not self._rows and self._enumCtx:
+                self._parser.parse(self.connection._pull(self._uri,
+                                                                self._enumCtx))
+            if not self._rows: return None
+            self.rownumber += 1
+            return self._rows.pop(0)
+        except OperationalError, e:
+            raise OperationalError(e)
+        except Exception, e:
+            raise OperationalError(e)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
@@ -558,27 +636,27 @@ class wsmanCursor(object):
         self._check_executed()
         if not size: size = self.arraysize
         results = []
-        row = self.connection._fetchone(self)
+        row = self.fetchone()
         while size and row:
             results.append(row)
             size -= 1
-            if size: row = self.connection._fetchone(self)
+            if size: row = self.fetchone()
         return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
         results = []
-        row = self.connection._fetchone(self)
+        row = self.fetchone()
         while row:
             results.append(row)
-            row = self.connection._fetchone(self)
+            row = self.fetchone()
         return results
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        row = self.connection._fetchone(self)
+        row = self.fetchone()
         if not row: raise StopIteration
         return row
 
@@ -610,14 +688,10 @@ class wsmanCnx:
     This class represent an WS-Management Connection connection.
     """
     def __init__(self, *args, **kwargs):
-#        self._lock = threading.RLock()
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'http')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))
         self._path = kwargs.get('path', '/wsman')
-        self._dialect = {'WQL':WSM_WQL_FILTER_DIALECT,
-                        'CQL':WSM_CQL_FILTER_DIALECT,
-                        }.get(kwargs.get('dialect', '').upper(), '')
         self._namespace = kwargs.get('namespace', 'root/cimv2')
         self._url='%s://%s:%s%s'%(self._scheme,self._host,self._port,self._path)
         self._urlOpener = urllib2.build_opener()
@@ -632,16 +706,16 @@ class wsmanCnx:
                                                     kwargs['cert_file'])
             self._urlOpener.add_handler(sslauthhandler)
         self._wsm_vendor = ''
-        xml_repl = self._wsman_request("""<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsmid="http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd">
-<s:Header/>
-<s:Body>
-<wsmid:Identify/>
-</s:Body>
-</s:Envelope>""").read()
+        self._fltr={'WQL':WQL_FILTER_TMPL,
+                    'CQL':CQL_FILTER_TMPL,
+                    }.get(kwargs.get('dialect', '').upper(), '')
+        xml_repl = self._wsman_request(IDENT_REQ).read()
         if 'ProductVendor' not in xml_repl:
-            raise InterfaceError,"Access denied for user '%s' to '%s'"%(
-                                            kwargs.get('user', ''), self._url)
-        elif 'Microsoft' in xml_repl: self._wsm_vendor = 'Microsoft'
+            raise InterfaceError("Access denied for user '%s' to '%s'"%(
+                                            kwargs.get('user', ''), self._url))
+        elif 'Microsoft' in xml_repl:
+            self._fltr = WQL_FILTER_TMPL
+            self._wsm_vendor = 'Microsoft'
         elif 'Openwsman' in xml_repl: self._wsm_vendor = 'Openwsman'
         else: self._wsm_vendor = ''
 
@@ -649,8 +723,6 @@ class wsmanCnx:
         """Send SOAP+XML data over HTTP to the specified url. Return the
         response in XML.  Uses Python's build-in urllib2.
         """
-
-        data = '<?xml version="1.0" encoding="utf-8" ?>\n%s'%data
 
         headers = { 'Content-type': 'application/soap+xml; charset="utf-8"',
                     'Content-length': len(data),
@@ -680,122 +752,43 @@ class wsmanCnx:
         return xml_repl
 
 
-    def _execute(self, cursor, query):
+    def _enumerate(self, uri, query):
         """
-        Execute Query
+        Sent Enumerate request and return replay file handler
         """
-        try:
-            props, classname, where = WQLPAT.match(query).groups('')
-        except:
-            raise ProgrammingError, "Syntax error in the query statement."
-        cursor._selectors.clear()
-        if where:
-            try:
-                cursor._selectors.update(
-                    eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',', where))
-                    )
-                if [v for v in cursor._selectors.values() if type(v) is list]:
-                    kbkeys = ''
-                    if props != '*':
-                        kbkeys = ',%s'%','.join(cursor._selectors.keys())
-                    query = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
-                elif self._dialect: cursor._selectors.clear()
-            except: cursor._selectors.clear()
-        if props == '*': cursor._props = []
-        else:cursor._props=[p for p in set(props.replace(' ','').split(','))]
-#        self._lock.acquire()
-        try:
-            try:
-                if self._wsm_vendor == 'Microsoft':
-                    fltr = '\n<wsman:Filter Dialect="%s">%s</wsman:Filter>'%(
-                                                WSM_WQL_FILTER_DIALECT, query)
-                    if not self._namespace.startswith('http'):
-                        cursor._uri = '/'.join((XML_NS_WIN32_CIM_CLASS,
-                        self._namespace, '*'))
-                    else: cursor._uri = '/'.join((self._namespace, '*'))
-                else:
-                    fltr = ''
-                    if not self._namespace.startswith('http'):
-                        cursor._uri = '/'.join(({'CIM': XML_NS_CIM_CLASS,
-                                            'OpenWBEM': XML_NS_OWBEM_CIM_CLASS,
-                                            'Linux': XML_NS_LINUX_CIM_CLASS,
-                                            'OMC': XML_NS_OMC_CIM_CLASS,
-                                            'PG': XML_NS_PG_CIM_CLASS,
-                                            }.get(classname.split('_', 1)[0],
-                                            XML_NS_CIM_CLASS), classname))
-                    else: cursor._uri = '/'.join((self._namespace, classname))
-                    if self._dialect:
-                        fltr='\n<wsman:Filter Dialect="%s">%s</wsman:Filter>'%(
-                                                            self._dialect,query)
-                    if self._wsm_vendor == 'Openwsman':
-                        xml_repl = self._wsman_request(INTR_REQ%(classname,
-                            classname, self._url, classname, uuid.uuid4()),
-                            '/'.join((XML_NS_CIM_INTRINSIC,classname,'GetClass')
-                            ))
-                        cursor._iparser.parse(xml_repl)
-                xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
-                    self._url, cursor._uri, uuid.uuid4(), """<wsen:Enumerate>
-<wsman:EnumerationMode>EnumerateObjectAndEPR</wsman:EnumerationMode>%s
-</wsen:Enumerate>"""%fltr), ENUM_ACTION_ENUMERATE)
-                cursor._parser.parse(xml_repl)
-                if not cursor._enumCtx: return
-                if not cursor.description:
-                    xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                        self._url, cursor._uri, uuid.uuid4(), """<wsen:Pull>
-<wsen:EnumerationContext>%s</wsen:EnumerationContext>
-</wsen:Pull>"""%cursor._enumCtx), ENUM_ACTION_PULL)
-                    cursor._parser.parse(xml_repl)
-            except InterfaceError, e:
-                raise InterfaceError, e
-            except OperationalError, e:
-                raise OperationalError, e
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            pass
-#            self._lock.release()
+        return self._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
+                        self._url, uri, uuid.uuid4(),
+                        ENUM_TMPL%(self._fltr and self._fltr%query or '')),
+                        ENUM_ACTION_ENUMERATE)
 
 
-    def _fetchone(self, cursor):
-#        self._lock.acquire()
-        try:
-            try:
-                while not cursor._rows and cursor._enumCtx:
-                    xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                        self._url, cursor._uri, uuid.uuid4(), """<wsen:Pull>
-<wsen:EnumerationContext>%s</wsen:EnumerationContext>
-</wsen:Pull>"""%cursor._enumCtx), ENUM_ACTION_PULL)
-                    cursor._parser.parse(xml_repl)
-                if not cursor._rows: return None
-                cursor.rownumber += 1
-                return cursor._rows.pop(0)
-            except OperationalError, e:
-                raise OperationalError, e
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            pass
-#            self._lock.release()
+    def _getClass(self, classname):
+        """
+        Sent Intrinsic GetClass request and return replay file handler
+        """
+        return self._wsman_request(INTR_REQ%(classname,
+                        classname, self._url, classname, uuid.uuid4()),
+                        '/'.join((XML_NS_CIM_INTRINSIC, classname, 'GetClass')))
 
 
-    def _release(self, cursor):
-        if not cursor._enumCtx: return
-#        self._lock.acquire()
-        try:
-            try:
-                xml_repl = self._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
-                    self._url, cursor._uri, uuid.uuid4(), """<wsen:Release>
-<wsen:EnumerationContext>%s</wsen:EnumerationContext>
-</wsen:Release>"""%cursor._enumCtx), ENUM_ACTION_RELEASE)
-                cursor._enumCtx = None
+    def _pull(self, uri, enumCtx):
+        """
+        Sent Pull request and return replay file handler
+        """
+        return self._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
+                        self._url, uri, uuid.uuid4(), PULL_TMPL%enumCtx),
+                        ENUM_ACTION_PULL)
 
-            except OperationalError, e:
-                raise OperationalError, e
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            pass
-#            self._lock.release()
+
+    def _release(self, uri, enumCtx):
+        """
+        Sent Release request and return replay file handler
+        """
+        self._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
+                        self._url, uri, uuid.uuid4(), RELEASE_TMPL%enumCtx),
+                        ENUM_ACTION_RELEASE).read()
+        return
+
 
     def __del__(self):
         self.close()
