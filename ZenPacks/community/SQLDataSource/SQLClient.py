@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.6 2011/09/14 23:10:40 egor Exp $"""
+$Id: SQLClient.py,v 2.7 2011/10/20 18:43:56 egor Exp $"""
 
-__version__ = "$Revision: 2.6 $"[11:-2]
+__version__ = "$Revision: 2.7 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -53,6 +53,128 @@ def _filename(device):
     return zenPath('var', _myname(), device)
 
 
+class Query(object):
+
+    def __init__(self, cs, client=None):
+        self.cs = cs 
+        self.sql = ''
+        self.resMaps = {}
+
+    def add(self, pname, tname, task):
+        if len(task) == 4:
+            sqlp, kbs, cs, columns = task
+            sql = sqlp
+        else:
+            sqlp, kbs, cs, columns, sql = task
+        if self.sql != sqlp:
+            if not self.sql: self.sql = sql
+            else: self.sql = sqlp
+        table = ((pname, tname), columns) 
+        ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
+        ival = tuple([str(v).strip().upper() for v in (kbs or {}).values()])
+        self.resMaps.setdefault(ikey, {}).setdefault(ival, []).append(table)
+
+
+    def parseError(self, err):
+        results = {}
+        err = Failure(err)
+        err.value = 'Received error (%s) from query: %s'%(err.value, self.sql)
+        log.error(err.getErrorMessage())
+        for instances in self.resMaps.values():
+            for tables in instances.values():
+                for (pname, table), props in tables:
+                    results.setdefault(pname,{})[table] = [err,]
+        return results
+
+
+    def parseValue(self, value):
+        if isinstance(value, datetime.timedelta):
+            return DateTime(datetime.datetime.now() - value)
+        if isinstance(value, datetime.datetime): return DateTime(value)
+        if isinstance(value, decimal.Decimal): return long(value)
+        if type(value) not in (str, unicode): return value
+        if value.isdigit(): return long(value)
+        if value.replace('.', '', 1).isdigit(): return float(value)
+        if value == 'false': return False
+        if value == 'true': return True
+        return value.strip()
+
+
+    def parseResult(self, cursor):
+        manyrows = []
+        rows = {}
+        results = {}
+        if not cursor.description:
+            for instances in resMaps.values():
+                for tables in instances.values():
+                    for (pn, table), props in tables:
+                        results.setdefault(pn, {})[table] = []
+            return results
+        header = [h[0].upper() for h in cursor.description]
+        manyrows.extend(cursor.fetchmany())
+        while manyrows:
+            while manyrows:
+                row = manyrows.pop(0)
+                rDict = dict(zip(header, [self.parseValue(v) for v in row]))
+                for kbKey, kbVal in self.resMaps.iteritems():
+                    cNames=set([k.upper() for k in kbVal.values()[0][0][1].keys()])
+                    if not cNames.intersection(set(header)):
+                        rows[str(row[0]).upper()] = row[-1]
+                        continue
+                    kIdx = []
+                    for kb in kbKey:
+                        kbV = rDict.get(kb, '')
+                        if kbV is list: kbV = ' '.join(kbV)
+                        kIdx.append(str(kbV).upper())
+                    for (pn, table), cols in kbVal.get(tuple(kIdx), []):
+                        result = {}
+                        for name, anames in cols.iteritems():
+                            if not hasattr(anames, '__iter__'): anames=(anames,)
+                            for aname in anames:
+                                result[aname] = rDict.get(name.upper(), None)
+                        if result: results.setdefault(pn, {}).setdefault(
+                                                        table,[]).append(result)
+            manyrows.extend(cursor.fetchmany())
+        for kbVal in self.resMaps.values():
+            for tables in kbVal.values():
+                for (pn, table), cols in tables:
+                    if table in results.get(pn, {}): continue
+                    result = {}
+                    for name, anames in cols.iteritems():
+                        val = self.parseValue(rows.get(name.upper(), None))
+                        if not hasattr(anames, '__iter__'): anames=(anames,)
+                        for aname in anames: result[aname] = val
+                    if result: results.setdefault(pn, {}).setdefault(
+                                                        table,[]).append(result)
+        return results
+
+
+    def run(self, dbpool):
+        def _execute(txn):
+            for q in re.split('[ \n]go[ \n]|;[ \n]', self.sql, re.I):
+                if not q.strip(): continue
+                txn.execute(q.strip())
+            return self.parseResult(txn)
+        if not hasattr(dbpool, 'runInteraction'):
+            try: return _execute(dbpool)
+            except Exception, e: return self.parseError(e) 
+        d = dbpool.runInteraction(_execute)
+        d.addErrback(self.parseError)
+        return d
+
+
+class SQLPlugin(object):
+
+    def __init__(self, tables={}):
+        self.tables = tables
+
+    def prepareQueries(self, device=None):
+        return self.tables
+
+    def name(self):
+        return 'SQLPlugin'
+
+
 class SQLClient(BaseClient):
 
     def __init__(self, device=None, datacollector=None, plugins=[]):
@@ -63,11 +185,15 @@ class SQLClient(BaseClient):
         self.results = []
 
 
-    def makePool(self, cs=None):
+    def __del__(self):
+        self.close()
+
+
+    def getDbPool(self, cs=None):
         if not cs: return None
         args, kwargs = self.parseCS(cs)
         kwargs.update({'cp_min':1,'cp_max':1})
-        return adbapi.ConnectionPool(*args, **kwargs)
+        return adbapi.ConnectionPool(*args,**kwargs)
 
 
     def parseCS(self, cs=None):
@@ -89,206 +215,85 @@ class SQLClient(BaseClient):
         return args, kwargs
 
 
-    def parseError(self, err, query, resMaps):
-        err = Failure(err)
-        err.value = 'Received error (%s) from query: %s'%(err.value, query)
-        log.error(err.getErrorMessage())
-        results = {}
-        for instances in resMaps.values():
-            for tables in instances.values():
-                for table, props in tables:
-                    results[table] = [err,]
-        return results
-
-
-    def parseValue(self, value):
-        if isinstance(value, datetime.timedelta):
-            return DateTime(datetime.datetime.now() - value)
-        if isinstance(value, datetime.datetime): return DateTime(value)
-        if isinstance(value, decimal.Decimal): return long(value)
-        if type(value) not in (str, unicode): return value
-        if value.isdigit(): return long(value)
-        if value.replace('.', '', 1).isdigit(): return float(value)
-        if value == 'false': return False
-        if value == 'true': return True
-        return value.strip()
-
-
-    def parseResults(self, cursor, resMaps):
-        results = {}
-        rows = {}
-        if not cursor.description:
-            for instances in resMaps.values():
-                for tables in instances.values():
-                    for table, props in tables:
-                        results[table] = []
-            return results
-        header = [h[0].upper() for h in cursor.description]
-        for row in (hasattr(cursor,'__iter__') and cursor or cursor.fetchall()):
-            rDict = dict(zip(header, [self.parseValue(v) for v in row]))
-            for kbKey, kbVal in resMaps.iteritems():
-                cNames=set([k.upper() for k in kbVal.values()[0][0][1].keys()])
-                if not cNames.intersection(set(header)):
-                    rows[str(row[0]).upper()] = row[-1]
-                    continue
-                kIdx = []
-                for kb in kbKey:
-                    kbV = rDict.get(kb, '')
-                    if kbV is list: kbV = ' '.join(kbV)
-                    kIdx.append(str(kbV).upper())
-                for table, cols in kbVal.get(tuple(kIdx), []):
-                    if table not in results: results[table] = []
-                    result = {}
-                    for name, anames in cols.iteritems():
-                        if not hasattr(anames, '__iter__'): anames=(anames,)
-                        for aname in anames:
-                            result[aname] = rDict.get(name.upper(), None)
-                    if result: results[table].append(result)
-        for kbVal in resMaps.values():
-            for tables in kbVal.values():
-                for table, cols in tables:
-                    if table in results: continue
-                    results[table] = []
-                    result = {}
-                    for name, anames in cols.iteritems():
-                        val = self.parseValue(rows.get(name.upper(), None))
-                        if not hasattr(anames, '__iter__'): anames=(anames,)
-                        for aname in anames: result[aname] = val
-                    if result: results[table].append(result)
-        return results
-
-
     def close(self):
-        del self.results[:]
         del self.plugins[:]
-
-
-    def sortQueries(self, tasks={}):
-        qIdx = {}
-        queries = {}
-        for tn, task in tasks.iteritems():
-            if len(task) == 4:
-                sql, kbs, cs, columns = task
-                sqlp = sql
-            else:
-                sql, sqlp, kbs, cs, columns = task
-            table = (tn, columns)
-            ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
-            ival = tuple([str(v).strip().upper() for v in (kbs or {}).values()])
-            if cs not in queries:
-                queries[cs] = {}
-                qIdx[cs] = {}
-            if sqlp not in queries[cs]:
-                if sqlp in qIdx[cs]:
-                    queries[cs][sqlp] = qIdx[cs][sqlp][1]
-                    del queries[cs][qIdx[cs][sqlp][0]]
-                else:
-                    qIdx[cs][sqlp] = (sql, {ikey:{ival:[table]}})
-                    queries[cs][sql]={():{():[table]}}
-                    continue
-            if ikey not in queries[cs][sqlp]:
-                queries[cs][sqlp][ikey] = {ival:[table]}
-            elif ival not in queries[cs][sqlp][ikey]:
-                queries[cs][sqlp][ikey][ival] = [table]
-            else:
-                queries[cs][sqlp][ikey][ival].append(table)
-        qIdx = None
-        return queries
+        del self.results[:]
 
 
     def syncQuery(self, tasks={}):
         results = {}
-        for cs, qs in self.sortQueries(tasks).iteritems():
+        queue = {}
+        for (pn, tn), q in tasks.iteritems():
+            queue.setdefault(q[2],{}).setdefault(q[0],Query(q[2])).add(pn,tn,q)
+        for cs, qlist in queue.iteritems():
             args, kwargs = self.parseCS(cs)
             fl = []
             if '.' in args[0]: fl.append(args[0].split('.')[-1])
-            dbapi = __import__(args[0], globals(), locals(), fl)
-            connection = dbapi.connect(*args[1:], **kwargs)
-            dbcursor = connection.cursor()
-            for sql, resMaps in qs.iteritems():
-                qList = [q.strip() for q in re.split('[ \n]go[ \n]|;[ \n]',
-                                                sql, re.I) if q.strip()]
-                try:
-                    for q in qList[:-1]:
-                        dbcursor.execute(q)
-                    dbcursor.execute(qList[-1])
-                    results.update(self.parseResults(dbcursor, resMaps))
-                except StandardError, ex:
-                    results.update(self.parseError(ex, sql, resMaps))
-            dbcursor.close()
-            connection.close()
+            try:
+                dbapi = __import__(args[0], globals(), locals(), fl)
+                connection = dbapi.connect(*args[1:], **kwargs)
+                dbcursor = connection.cursor()
+                for sql, query in qlist.iteritems():
+                    log.debug("SQL Query: %s", sql)
+                    result = query.run(dbcursor)
+                    for pn, res in result.iteritems():
+                        results.setdefault(pn, {}).update(res)
+                dbcursor.close()
+                connection.close()
+            except Exception, e:
+                for sql, query in qlist.iteritems():
+                    result = query.parseError(e)
+                    for pn, res in result.iteritems():
+                        results.setdefault(pn, {}).update(res)
         return results
 
 
-    def query(self, tasks={}):
-        return self.sortedQuery(self.sortQueries(tasks))
-
-
-    def sortedQuery(self, queries):
+    def runPool(self, cs, qlist):
         def inner(driver):
-            err = True
-            queryResult = {}
-            for cs, qs in queries.iteritems():
-                yield self.queryPoll(cs, qs)
-                queryResult.update(driver.next())
-            for val in queryResult.values():
-                if not isinstance(val[0], Failure):
-                    err = False
-                    break
-            if err: raise Exception(val[0].getErrorMessage())
-            yield defer.succeed(queryResult)
+            results = {}
+            dbpool = self.getDbPool(cs)
+            for sql, query in qlist.iteritems():
+                log.debug("SQL Query: %s", sql)
+                yield query.run(dbpool)
+                result = driver.next()
+                for pn, res in result.iteritems():
+                    results.setdefault(pn, {}).update(res)
+            dbpool.close()
+            yield defer.succeed(results)
             driver.next()
         return drive(inner)
 
 
-    def queryPoll(self, cs, qs):
-        def _execute(txn, sql, resMaps):
-            qList = [q.strip() for q in re.split('[ \n]go[ \n]|;[ \n]',
-                                                sql, re.I) if q.strip()]
-            for q in qList[:-1]:
-                txn.execute(q)
-#                txn.fetchall()
-            txn.execute(qList[-1])
-            return self.parseResults(txn, resMaps)
+    def query(self, tasks={}):
+        queue = {}
+        for (pn, tn), q in tasks.iteritems():
+            queue.setdefault(q[2],{}).setdefault(q[0],Query(q[2])).add(pn,tn,q)
         def inner(driver):
-            qResult = {}
-            dbpool = self.makePool(cs)
-            for query, resMaps in qs.iteritems():
-                log.debug("SQL Query: %s", query)
-                try:
-                    yield dbpool.runInteraction(_execute, query, resMaps)
-                    qResult.update(driver.next())
-                except StandardError, ex:
-                    qResult.update(self.parseError(ex, query, resMaps))
-            yield defer.succeed(qResult)
+            results = {}
+            for cs, queries in queue.iteritems():
+                yield self.runPool(cs, queries)
+                result = driver.next()
+                for pn, res in result.iteritems():
+                    results.setdefault(pn, {}).update(res)
+            yield defer.succeed(results)
             driver.next()
-            dbpool.close()
         return drive(inner)
 
 
     def run(self):
-        def inner(driver):
-            queries = {}
-            results = {}
-            for plugin in self.plugins:
-                pluginName = plugin.name()
-                log.debug("Sending queries for plugin: %s", pluginName)
-                log.debug("Queries: %s" % str(plugin.queries(self.device)))
-                for tn, q in plugin.prepareQueries(self.device).iteritems():
-                    queries["%s/%s"%(pluginName, tn)] = q
-            yield self.query(queries)
-            for tn, res in driver.next().iteritems():
-                pn, oldtn = tn.split('/', 1)
-                if pn not in results: results[pn] = {}
-                results[pn][oldtn] = res
-            for plugin in self.plugins:
-                self.results.append((plugin, results.get(plugin.name(), None)))
-        d = drive(inner)
         def finish(result):
+            for plugin in self.plugins:
+                self.results.append((plugin, result.get(plugin.name(), None)))
             if self.datacollector:
                 self.datacollector.clientFinished(self)
             else:
                 reactor.stop()
+        tasks = {}
+        for plugin in self.plugins:
+            pn = plugin.name()
+            for tn,t in (plugin.prepareQueries(self.device) or {}).iteritems():
+                tasks[(pn,tn)] = t
+        d = self.query(tasks)
         d.addBoth(finish)
         return d
 
@@ -297,6 +302,7 @@ class SQLClient(BaseClient):
         """Return data for this client
         """
         return self.results
+
 
 
 def sqlCollect(collector, device, ip, timeout):
@@ -332,6 +338,17 @@ def sqlCollect(collector, device, ip, timeout):
     collector.addClient(client, timeout, 'SQL', device.id)
 
 
+def SQLGet(cs, query, columns):
+    sp = SQLPlugin({'t': (query, {}, cs, columns)})
+    cl = SQLClient(device=None, plugins=[sp,])
+    cl.run()
+    reactor.run()
+    err = [Failure('ERROR:zen.SQLClient:No data received.')]
+    for plugin, result in cl.getResults():
+        if plugin == sp: return result.get('t', err)
+    return err
+
+
 if __name__ == "__main__":
     cs = "'MySQLdb',host='127.0.0.1',port=3306,db='information_schema',user='zenoss',passwd='zenoss'"
     query = "USE information_schema; SHOW GLOBAL STATUS;"
@@ -357,9 +374,10 @@ if __name__ == "__main__":
         elif opt in ("-a", "--aliases"):
             aliases = arg.split()
     columns = dict(zip(columns, aliases))
-    cl = SQLClient()
-    results = cl.syncQuery({'t':(query, {}, cs, columns)}).get('t',
-                            [Failure('ERROR:zen.SQLClient:No data received.')])
+    results = SQLGet(cs, query, columns)
+#    cl = SQLClient()
+#    results = cl.syncQuery({(None,'t'):(query, {}, cs, columns)}).get(None, {}).get('t',
+#                            [Failure('ERROR:zen.SQLClient:No data received.')])
     if isinstance(results[0], Failure):
         print results[0].getErrorMessage()
         sys.exit(1)

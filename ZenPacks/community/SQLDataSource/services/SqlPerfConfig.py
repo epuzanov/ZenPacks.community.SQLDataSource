@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.2 2011/09/01 20:05:38 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.3 2011/10/20 18:45:49 egor Exp $"""
 
-__version__ = "$Revision: 2.2 $"[11:-2]
+__version__ = "$Revision: 2.3 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -70,28 +70,7 @@ class SqlPerfConfig(CollectorConfigService):
                                 dp.rrdtype,
                                 dp.getRRDCreateCommand(perfServer),
                                 (dp.rrdmin, dp.rrdmax)))
-
-                    table = (tn, columns)
-                    ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
-                    ival = tuple([str(v).strip().upper() \
-                                                for v in (kbs or {}).values()])
-                    if cs not in queries:
-                        queries[cs] = {}
-                        qIdx[cs] = {}
-                    if sqlp not in queries[cs]:
-                        if sqlp in qIdx[cs]:
-                            queries[cs][sqlp] = qIdx[cs][sqlp][1]
-                            del queries[cs][qIdx[cs][sqlp][0]]
-                        else:
-                            qIdx[cs][sqlp] = (sql, {ikey:{ival:[table]}})
-                            queries[cs][sql]={():{():[table]}}
-                            continue
-                    if ikey not in queries[cs][sqlp]:
-                        queries[cs][sqlp][ikey] = {ival:[table]}
-                    elif ival not in queries[cs][sqlp][ikey]:
-                        queries[cs][sqlp][ikey][ival] = [table]
-                    else:
-                        queries[cs][sqlp][ikey][ival].append(table)
+                    queries[tn] = (sqlp, kbs, cs, columns, sql)
 
                 dpn = set(templ.getRRDDataPointNames())
                 for thr in templ.thresholds():

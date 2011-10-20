@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -619,7 +619,7 @@ class wsmanCursor(object):
         no more rows are available."""
         self._check_executed()
         try:
-            if not self._rows and self._enumCtx:
+            while not self._rows and self._enumCtx:
                 self._parser.parse(self.connection._pull(self._uri,
                                                                 self._enumCtx))
             if not self._rows: return None

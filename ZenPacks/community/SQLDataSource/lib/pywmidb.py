@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.0'
+__version__ = '1.4.2'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -153,7 +153,7 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module and connections may be shared
+# module may be shared, but not connections
 threadsafety = 2
 
 # this module use extended python format codes
@@ -207,8 +207,13 @@ class wmiCursor(object):
         self.connection = connection
         self.description = None
         self.rownumber = -1
-        self.arraysize = 1
-        self._rows = []
+        self.arraysize = 5
+        self._kbs = {}
+        self._host = connection._host
+        self._pEnum = None
+        self._objs = None
+        self._curObj = 0
+        self._count = uint32_t()
 
     def _check_executed(self):
         if not getattr(self.connection, '_ctx', None):
@@ -219,11 +224,27 @@ class wmiCursor(object):
     def __del__(self):
         self.close()
 
+    def _close(self):
+        """
+        Release Enumerator and reset objects buffer.
+        """
+        if getattr(self._count, 'value', 0) > 0:
+            try: result = library.IUnknown_Release(self._pEnum,
+                            self.connection._ctx)
+            except: pass
+        if self._objs != None:
+            for i in range(self.arraysize):
+                talloc_free(self._objs[i]) 
+
     def close(self):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
-        del self._rows[:]
+        self._close()
+        self._kbs.clear()
+        self._objs = None
+        self._pEnum = None
+        self._count = None
         self.description = None
 
     def _convertArray(self, arr):
@@ -293,7 +314,8 @@ class wmiCursor(object):
             raise InterfaceError("Connection closed.")
         self.description = None
         self.rownumber = -1
-        del self._rows[:]
+        self._curObj = 0
+        self._kbs.clear()
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -306,22 +328,25 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            pEnum = POINTER(IEnumWbemClassObject)()
-            objs = (POINTER(WbemClassObject) * self.arraysize)()
-            count = uint32_t()
+            if self._count.value > 0:
+                result = library.IUnknown_Release(self._pEnum,
+                            self.connection._ctx)
+#                WERR_CHECK(result, self._host, "Release")
+            del self._pEnum
+            self._pEnum = POINTER(IEnumWbemClassObject)()
+            self._objs = (POINTER(WbemClassObject) * self.arraysize)()
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
                                             ).replace('\\\\"','\\"')).groups('')
-            kbs = {}
             if where:
-                try:kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(',',
-                                                                        where)))
-                except: pass
-                if [v for v in kbs.values() if type(v) is list]:
-                    kbkeys = ''
-                    if props != '*':
-                        kbkeys = ',%s'%','.join(kbs.keys())
-                    operation = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
-                else: kbs.clear()
+                try:
+                    self._kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(
+                                                                    ',',where)))
+                    if True: #[v for v in self._kbs.values() if type(v) is list]:
+                        if props == '*': kbkeys = ''
+                        else: kbkeys = ',%s'%','.join(self._kbs.keys())
+                        operation='SELECT %s%s FROM %s'%(props,kbkeys,classname)
+                    else: self._kbs.clear()
+                except: self._kbs.clear()
             props = props.upper().replace(' ','').split(',')
             if '*' in props: props.remove('*')
             result = library.IWbemServices_ExecQuery(
@@ -333,22 +358,22 @@ class wmiCursor(object):
                             WBEM_FLAG_RETURN_IMMEDIATELY | \
                             WBEM_FLAG_ENSURE_LOCATABLE,
                             None,
-                            byref(pEnum))
-            WERR_CHECK(result, self.connection._host, "ExecQuery")
+                            byref(self._pEnum))
+            WERR_CHECK(result, self._host, "ExecQuery")
             result = library.IEnumWbemClassObject_SmartNext(
-                            pEnum,
+                            self._pEnum,
                             self.connection._ctx,
                             -1,
                             self.arraysize,
-                            objs,
-                            byref(count))
-            WERR_CHECK(result,self.connection._host,"Retrieve result data.")
-            if count.value == 0: return
-            klass = objs[0].contents.obj_class.contents
-            inst = objs[0].contents.instance.contents
+                            self._objs,
+                            byref(self._count))
+            WERR_CHECK(result,self._host,"Retrieve result data.")
+            if self._count.value == 0: return
+            klass = self._objs[0].contents.obj_class.contents
+            inst = self._objs[0].contents.instance.contents
             cimclass = getattr(klass, '__CLASS', '')
-            cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
-                                            '').replace('\\', '/')
+            cimnamespace = getattr(self._objs[0].contents, '__NAMESPACE',
+                                                        '').replace('\\', '/')
             dDict = {}
             maxlen = {}
             kbKeys = []
@@ -371,63 +396,13 @@ class wmiCursor(object):
                 props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
             self.description = tuple([dDict.get(p,(p, 8, None, None, None,
                                                 None, None)) for p in props])
-            while count.value != 0:
-                for i in range(count.value):
-                    klass = objs[i].contents.obj_class.contents
-                    inst = objs[i].contents.instance.contents
-                    pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
-                            '__NAMESPACE':getattr(objs[i].contents,'__NAMESPACE'
-                                                        ,'').replace('\\', '/')}
-                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                        prop = klass.properties[j]
-                        if not prop.name: continue
-                        uName = prop.name.upper()
-                        if uName not in (props + kbKeys): continue
-                        pdict[uName] = self._convert(inst.data[j],
-                                prop.desc.contents.cimtype & CIM_TYPEMASK)
-                        if prop.name not in kbs: continue
-                        if kbs[prop.name] != pdict[uName]: break
-                    else:
-                        if '__PATH' in props:
-                            iPath = []
-                            for k in kbKeys:
-                                kbn, kbType = dDict.get(k, (k, 8))[:2]
-                                if kbType != NUMBER:
-                                    iPath.append('%s="%s"'%(kbn, pdict[k]))
-                                else:
-                                    iPath.append('%s=%s'%(kbn, pdict[k]))
-                            pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
-                                                            ','.join(iPath))
-                        self._rows.append(tuple([pdict.get(p, None
-                                                            ) for p in props]))
-                result = library.IEnumWbemClassObject_SmartNext(
-                            pEnum,
-                            self.connection._ctx,
-                            -1,
-                            self.arraysize,
-                            objs,
-                            byref(count))
-                WERR_CHECK(result,self.connection._host,"Retrieve result data.")
-            for i in range(self.arraysize):
-                talloc_free(objs[i]) 
-            objs = None
-            pEnum = None
-            count = None
             if self.description: self.rownumber = 0
 
         except WError, e:
-            for i in range(self.arraysize):
-                talloc_free(objs[i]) 
-            objs = None
-            pEnum = None
-            count = None
+            self.close()
             raise OperationalError(e)
         except Exception, e:
-            for i in range(self.arraysize):
-                talloc_free(objs[i]) 
-            objs = None
-            pEnum = None
-            count = None
+            self.close()
             raise OperationalError(e)
 
 
@@ -452,30 +427,131 @@ class wmiCursor(object):
     def fetchone(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        self._check_executed()
-        if not self._rows: return None
-        self.rownumber += 1
-        return self._rows.pop(0)
+        return (self.fetchmany(size=1) or (None,))[0]
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if size: size += self.rownumber
-        else: size = self.arraysize + self.rownumber
+        if not size: size = self.arraysize
         results = []
-        while self._rows and self.rownumber < size:
-            self.rownumber += 1
-            results.append(self._rows.pop(0))
+        props = [p[0].upper() for p in self.description]
+        try:
+            while self._count.value != 0:
+                for self._curObj in range(self._curObj, self._count.value):
+                    iPath = []
+                    klass = self._objs[self._curObj].contents.obj_class.contents
+                    inst = self._objs[self._curObj].contents.instance.contents
+                    pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
+                        '__NAMESPACE':getattr(self._objs[self._curObj].contents,
+                                            '__NAMESPACE','').replace('\\','/')}
+                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
+                        prop = klass.properties[j]
+                        if not prop.name: continue
+                        uName = prop.name.upper()
+                        pType = prop.desc.contents.cimtype & CIM_TYPEMASK
+                        pVal = self._convert(inst.data[j], pType)
+                        pdict[uName] = pVal
+                        if self._kbs.get(prop.name, pVal) != pVal:
+                            pdict.clear()
+                            break
+                        if '__PATH' not in props: continue
+                        for i in range(prop.desc.contents.qualifiers.count):
+                            q = prop.desc.contents.qualifiers.item[i].contents
+                            if q.name not in ['key']: continue
+                            if pType == NUMBER:
+                                iPath.append('%s=%s'%(prop.name, pVal))
+                            else:
+                                iPath.append('%s="%s"'%(prop.name, pVal))
+                    talloc_free(self._objs[self._curObj]) 
+                    if not pdict: continue
+                    if '__PATH' in props:
+                        pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
+                                                            ','.join(iPath))
+                    results.append(tuple([pdict.get(p, None) for p in props]))
+                    pdict.clear()
+                    self.rownumber += 1
+                    if len(results) == size: break
+                self._curObj += 1
+                if len(results) == size: break
+                self._curObj = 0
+                del self._objs
+                self._objs = (POINTER(WbemClassObject) * self.arraysize)()
+                result = library.IEnumWbemClassObject_SmartNext(
+                            self._pEnum,
+                            self.connection._ctx,
+                            -1,
+                            self.arraysize,
+                            self._objs,
+                            byref(self._count))
+                WERR_CHECK(result,self._host,"Retrieve result data.")
+
+        except WError, e:
+            self.close()
+            raise OperationalError(e)
+        except Exception, e:
+            self.close()
+            raise OperationalError(e)
         return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
         results = []
-        while self._rows:
-            self.rownumber += 1
-            results.append(self._rows.pop(0))
+        props = [p[0].upper() for p in self.description]
+        try:
+            while self._count.value != 0:
+                for self._curObj in range(self._curObj, self._count.value):
+                    iPath = []
+                    klass = self._objs[self._curObj].contents.obj_class.contents
+                    inst = self._objs[self._curObj].contents.instance.contents
+                    pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
+                        '__NAMESPACE':getattr(self._objs[self._curObj].contents,
+                                            '__NAMESPACE','').replace('\\','/')}
+                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
+                        prop = klass.properties[j]
+                        if not prop.name: continue
+                        uName = prop.name.upper()
+                        pType = prop.desc.contents.cimtype & CIM_TYPEMASK
+                        pVal = self._convert(inst.data[j], pType)
+                        pdict[uName] = pVal
+                        if self._kbs.get(prop.name, pVal) != pVal:
+                            pdict.clear()
+                            break
+                        if '__PATH' not in props: continue
+                        for i in range(prop.desc.contents.qualifiers.count):
+                            q = prop.desc.contents.qualifiers.item[i].contents
+                            if q.name not in ['key']: continue
+                            if pType == NUMBER:
+                                iPath.append('%s=%s'%(prop.name, pVal))
+                            else:
+                                iPath.append('%s="%s"'%(prop.name, pVal))
+                    talloc_free(self._objs[self._curObj]) 
+                    if not pdict: continue
+                    if '__PATH' in props:
+                        pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
+                                                            ','.join(iPath))
+                    results.append(tuple([pdict.get(p, None) for p in props]))
+                    pdict.clear()
+                    self.rownumber += 1
+                self._curObj = 0
+                del self._objs
+                self._objs = (POINTER(WbemClassObject) * self.arraysize)()
+                result = library.IEnumWbemClassObject_SmartNext(
+                            self._pEnum,
+                            self.connection._ctx,
+                            -1,
+                            self.arraysize,
+                            self._objs,
+                            byref(self._count))
+                WERR_CHECK(result,self._host,"Retrieve result data.")
+
+        except WError, e:
+            self.close()
+            raise OperationalError(e)
+        except Exception, e:
+            self.close()
+            raise OperationalError(e)
         return results
 
     def next(self):

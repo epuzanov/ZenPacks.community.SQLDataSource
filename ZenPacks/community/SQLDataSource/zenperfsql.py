@@ -12,18 +12,17 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.4 2011/09/02 17:47:43 egor Exp $"""
+$Id: zenperfsql.py,v 2.5 2011/10/20 18:44:53 egor Exp $"""
 
-__version__ = "$Revision: 2.4 $"[11:-2]
+__version__ = "$Revision: 2.5 $"[11:-2]
 
 import logging
-from copy import copy
+import pysamba.twisted.reactor
 
 import Globals
 import zope.component
 import zope.interface
 from DateTime import DateTime
-import md5
 
 from twisted.internet import defer, reactor
 from twisted.python.failure import Failure
@@ -39,7 +38,7 @@ from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         TaskStates
 from Products.ZenEvents.ZenEventClasses import Error, Clear
 from Products.ZenUtils.observable import ObservableMixin
-from SQLClient import SQLClient
+from SQLClient import SQLClient, SQLPlugin
 
 # We retrieve our configuration data remotely via a Twisted PerspectiveBroker
 # connection. To do so, we need to import the class that will be used by the
@@ -47,6 +46,7 @@ from SQLClient import SQLClient
 from Products.ZenUtils.Utils import unused
 from Products.ZenCollector.services.config import DeviceProxy
 unused(DeviceProxy)
+unused(Globals)
 
 #
 # creating a logging context for this module to use
@@ -84,72 +84,6 @@ def rrpn(expression, value):
     except:
         return value
 
-class SubConfigurationTaskSplitter(SimpleTaskSplitter):
-    """
-    A drop-in replacement for original SubConfigurationTaskSplitter class.
-    A task splitter that creates a single scheduled task by
-    device, cycletime and other criteria.
-    """
-
-    subconfigName = 'datasources'
-
-    def makeConfigKey(self, config, subconfig):
-        raise NotImplementedError("Required method not implemented")
-
-    def _newTask(self, name, configId, interval, config):
-        """
-        Handle the dirty work of creating a task
-        """
-        self._taskFactory.reset()
-        self._taskFactory.name = name
-        self._taskFactory.configId = configId
-        self._taskFactory.interval = interval
-        self._taskFactory.config = config
-        return self._taskFactory.build()
-
-    def _splitSubConfiguration(self, config):
-        subconfigs = {}
-        for subconfig in getattr(config, self.subconfigName):
-            key = self.makeConfigKey(config, subconfig)
-            subconfigList = subconfigs.setdefault(key, [])
-            subconfigList.append(subconfig)
-        return subconfigs
-
-    def splitConfiguration(self, configs):
-        # This name required by ITaskSplitter interface
-        tasks = {}
-        for config in configs:
-            log.debug("Splitting config %s", config)
-
-            # Group all of the subtasks under the same configId
-            # so that updates clean up any previous tasks
-            # (including renames)
-            configId = config.id
-
-            subconfigs = self._splitSubConfiguration(config)
-            for key, subconfigGroup in subconfigs.items():
-                name = ' '.join(map(str, key))
-                interval = key[1]
-
-                configCopy = copy(config)
-                setattr(configCopy, self.subconfigName, subconfigGroup)
-
-                tasks[name] = self._newTask(name,
-                                            configId,
-                                            interval,
-                                            configCopy)
-        return tasks
-
-class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
-    """
-    A task splitter that creates a single scheduled task by
-    device, cycletime and other criteria.
-    """
-    subconfigName = 'datapoints'
-
-    def makeConfigKey(self, config, subconfig):
-        return (config.id, config.configCycleInterval,
-                md5.new(subconfig[0]).hexdigest())
 
 # Create an implementation of the ICollectorPreferences interface so that the
 # ZenCollector framework can configure itself from our preferences.
@@ -166,6 +100,7 @@ class ZenPerfSqlPreferences(object):
         self.cycleInterval = 5 * 60 # seconds
         self.configCycleInterval = 20 # minutes
         self.options = None
+        self.maxTasks = 1
 
         # the configurationService attribute is the fully qualified class-name
         # of our configuration service that runs within ZenHub
@@ -182,9 +117,6 @@ class ZenPerfSqlPreferences(object):
 
 class ZenPerfSqlTask(ObservableMixin):
     zope.interface.implements(IScheduledTask)
-
-    #counter to keep track of total queries sent
-    QUERIES = 0
 
     STATE_SQLC_CONNECT = 'SQLC_CONNECT'
     STATE_SQLC_QUERY = 'SQLC_QUERY'
@@ -226,23 +158,6 @@ class ZenPerfSqlTask(ObservableMixin):
                                                         "zenperfsql")
         self._sqlc = None
 
-    def _finished(self, result):
-        """
-        Callback activated when the task is complete so that final statistics
-        on the collection can be displayed.
-        """
-
-        self._cleanup()
-        if not isinstance(result, Failure):
-            log.debug("Device %s [%s] scanned successfully",
-                      self._devId, self._manageIp)
-        else:
-            log.debug("Device %s [%s] scanned failed, %s",
-                      self._devId, self._manageIp, result.getErrorMessage())
-
-        # give the result to the rest of the callback/errchain so that the
-        # ZenCollector framework can keep track of the success/failure rate
-        return result
 
     def _failure(self, result, comp=None):
         """
@@ -264,70 +179,67 @@ class ZenPerfSqlTask(ObservableMixin):
             agent=collectorName,
             ))
 
+        self._cleanup()
         # give the result to the rest of the errback chain
         return result
 
 
-    def _sendEvents(self, devices):
+    def _sendEvents(self, components):
         """
         Sent Error and Clear events 
         """
         message = "Could not fetch data"
-        agent = self._preferences.collectorName,
         events = []
-        for devId, components in devices.iteritems():
-            errors = []
-            for comp, severity in components.iteritems():
-                if isinstance(severity, Failure):
-                    message = severity.getErrorMessage()
-                    severity = Error
-                event = dict(
-                    summary = "Could not fetch data",
-                    message = message,
-                    eventClass = '/Status/PyDBAPI',
-                    device = devId,
-                    component = comp,
-                    severity = severity,
-                    agent = agent,
-                    )
-                if severity == Error:
-                    errors.append(event)
-                else:
-                    events.append(event)
-            if len(errors) == len(components) > 0:
-                event = errors[0]
-                del event['component']
-                events.append(event)
+        errors = []
+        for comp, severity in components.iteritems():
+            event = dict(
+                summary = "Could not fetch data",
+                message = message,
+                eventClass = '/Status/PyDBAPI',
+                device = self._devId,
+                component = comp,
+                severity = severity,
+                agent = self._preferences.collectorName,
+                )
+            if isinstance(severity, Failure):
+                event['message'] = severity.getErrorMessage()
+                event['severity'] = Error
+                errors.append(event)
             else:
-                events.extend(errors)
+                events.append(event)
+        if len(errors) == len(components) > 0:
+            event = errors[0]
+            del event['component']
+            events.append(event)
+        else:
+            events.extend(errors)
         for event in events:
             self._eventService.sendEvent(event)
 
+    def clientFinished(self, client):
+        pass
 
-    def _collectSuccessful(self, results):
+    def _collectSuccessful(self, results={}):
         """
         Callback for a successful fetch of services from the remote device.
         """
         self.state = ZenPerfSqlTask.STATE_SQLC_PROCESS
 
+        try: results = self._sqlc.getResults()[0][1]
+        except: pass
+
         log.debug("Successful collection from %s [%s], results=%s",
                   self._devId, self._manageIp, results)
-
-#        for q in self._queries.values():
-#            ZenPerfSqlTask.QUERIES += len(q)
-
         if not results: return None
-#        compstatus = {self._monitor:{'':Clear}}
+
+
         compstatus = {}
         for cs,tn,dpname,comp,expr,rrdPath,rrdType,rrdC,mm in self._datapoints:
             values = []
-            if '/' not in tn: devId = self._monitor
-            else: devId = tn.split('/')[0] or self._monitor
-            if devId not in compstatus: compstatus[devId] = {}
-            if comp not in compstatus[devId]: compstatus[devId][comp] = Clear
+            compstatus[comp] = Clear
             for d in results.get(tn, []):
                 if isinstance(d, Failure):
-                    compstatus[devId][comp] = d
+                    compstatus[comp] = d
                     break
                 if len(d) == 0: continue
                 dpvalue = d.get(dpname, None)
@@ -362,26 +274,11 @@ class ZenPerfSqlTask(ObservableMixin):
                                             min=mm[0],
                                             max=mm[1])
             except Exception, e:
-                compstatus[devId][comp] = Failure(e)
+                compstatus[comp] = Failure(e)
         self._sendEvents(compstatus)
         compstatus.clear()
+        self._cleanup()
         return results
-
-
-    def _collectData(self):
-        """
-        Callback called after a connect or previous collection so that another
-        collection can take place.
-        """
-        log.debug("Polling for SQL data from %s [%s]", 
-                  self._devId, self._manageIp)
-
-        self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
-        self._sqlc = SQLClient(self._taskConfig)
-        cs = self._datapoints[0][0]
-        d = self._sqlc.sortedQuery({cs: self._taskConfig.queries[cs]})
-        d.addCallbacks(self._collectSuccessful, self._failure)
-        return d
 
 
     def cleanup(self):
@@ -395,17 +292,16 @@ class ZenPerfSqlTask(ObservableMixin):
 
 
     def doTask(self):
-        log.debug("Scanning device %s [%s]", self._devId, self._manageIp)
 
-        # try collecting events after a successful connect, or if we're
-        # already connected
+        log.debug("Polling for SQL data from %s [%s]", 
+                                                    self._devId, self._manageIp)
 
-        d = self._collectData()
+        self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
 
-        # Add the _finished callback to be called in both success and error
-        # scenarios. While we don't need final error processing in this task,
-        # it is good practice to catch any final errors for diagnostic purposes.
-        d.addCallback(self._finished)
+        self._sqlc = SQLClient( self._taskConfig, self,
+                                [SQLPlugin(self._taskConfig.queries.copy())])
+        d = self._sqlc.run()
+        d.addCallbacks(self._collectSuccessful, self._failure)
 
         # returning a Deferred will keep the framework from assuming the task
         # is done until the Deferred actually completes
@@ -418,6 +314,6 @@ class ZenPerfSqlTask(ObservableMixin):
 if __name__ == '__main__':
     myPreferences = ZenPerfSqlPreferences()
     myTaskFactory = SimpleTaskFactory(ZenPerfSqlTask)
-    myTaskSplitter = ZenPerfSqlTaskSplitter(myTaskFactory)
+    myTaskSplitter = SimpleTaskSplitter(myTaskFactory)
     daemon = CollectorDaemon(myPreferences, myTaskSplitter)
     daemon.run()
