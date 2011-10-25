@@ -20,10 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 import datetime
-# import threading
 import subprocess
 import os
 import re
@@ -239,10 +238,12 @@ class isqlCursor(object):
         self._check_executed()
         if not size: size = self.arraysize
         results = []
-        while size and row:
+        row = self.connection._fetchone(self)
+        while row:
             results.append(row)
             size -= 1
-            if size: row = self.connection._fetchone(self)
+            if size == 0: break
+            row = self.connection._fetchone(self)
         return results
 
     def fetchall(self):
@@ -319,7 +320,6 @@ class isqlCnx:
         if uid:
             self._args.insert(2, uid)
             if pwd: self._args.insert(3, pwd)
-#        self._lock = threading.RLock()
 
 
     def __del__(self):
@@ -353,61 +353,56 @@ class isqlCnx:
         rows = []
         tCount = 0
         cMap = []
-#        self._lock.acquire()
         try:
-            try:
-                p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
-                                                stderr=subprocess.PIPE,
-                                                stdout=subprocess.PIPE)
-                queries = [q.strip().replace('\n',' ') for q in cursor._queue]
-                del cursor._queue[:]
-                lines, err = p.communicate('%s\n'%'\n'.join(queries))
-                if err: raise OperationalError, ('00000', err.strip())
-                for line in lines.splitlines():
-                    if line.startswith('[ISQL]INFO:'): pass
-                    elif line.strip() == '': pass
-                    elif line.startswith('+---'):
-                        if tCount == 3:
-                            tCount = 0
-                            del rows[:]
-                        if tCount == 0:
-                            cMap = map(len, line[2:-2].split('+-'))
-                        tCount += 1
-                    elif line.startswith('| '):
-                        props = []
-                        cEnd = 0
-                        for cLen in cMap:
-                            cStart = cEnd + 2
-                            cEnd = cStart + cLen
-                            if tCount == 2:
-                                props.append(self._convert(line[cStart:cEnd]))
-                            else:
-                                props.append(line[cStart:cEnd])
-                        rows.append(tuple(props))
-                if len(rows) < 2: return
-                descr = []
-                for col, value in zip(rows[0], rows[1]):
-                    cName = col.strip()
-                    if type(value) == str:
-                        maxlen = len(col) > len(cName) and len(col) or None
-                        descr.append((cName, 0, maxlen, maxlen,None,None,None))
-                    elif type(value) == datetime.datetime:
-                        descr.append((cName, 2, None, None, None, None, None))
-                    elif type(value) == bool:
-                        descr.append((cName, 3, None, None, None, None, None))
-                    else:
-                        descr.append((cName, 1, None, None, None, None, None))
-                cursor._description = tuple(descr)
-                cursor._rows.extend(rows[1:])
-                cursor.rowcount = len(cursor._rows)
-                cursor.rownumber = 0
-            except OperationalError, e:
-                raise OperationalError, e
-            except Exception, e:
-                raise OperationalError, e
-        finally:
-            pass
-#            self._lock.release()
+            p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            stdout=subprocess.PIPE)
+            queries = [q.strip().replace('\n',' ') for q in cursor._queue]
+            del cursor._queue[:]
+            lines, err = p.communicate('%s\n'%'\n'.join(queries))
+            if err: raise OperationalError, ('00000', err.strip())
+            for line in lines.splitlines():
+                if line.startswith('[ISQL]INFO:'): pass
+                elif line.strip() == '': pass
+                elif line.startswith('+---'):
+                    if tCount == 3:
+                        tCount = 0
+                        del rows[:]
+                    if tCount == 0:
+                        cMap = map(len, line[2:-2].split('+-'))
+                    tCount += 1
+                elif line.startswith('| '):
+                    props = []
+                    cEnd = 0
+                    for cLen in cMap:
+                        cStart = cEnd + 2
+                        cEnd = cStart + cLen
+                        if tCount == 2:
+                            props.append(self._convert(line[cStart:cEnd]))
+                        else:
+                            props.append(line[cStart:cEnd])
+                    rows.append(tuple(props))
+            if len(rows) < 2: return
+            descr = []
+            for col, value in zip(rows[0], rows[1]):
+                cName = col.strip()
+                if type(value) == str:
+                    maxlen = len(col) > len(cName) and len(col) or None
+                    descr.append((cName, 0, maxlen, maxlen,None,None,None))
+                elif type(value) == datetime.datetime:
+                    descr.append((cName, 2, None, None, None, None, None))
+                elif type(value) == bool:
+                    descr.append((cName, 3, None, None, None, None, None))
+                else:
+                    descr.append((cName, 1, None, None, None, None, None))
+            cursor._description = tuple(descr)
+            cursor._rows.extend(rows[1:])
+            cursor.rowcount = len(cursor._rows)
+            cursor.rownumber = 0
+        except OperationalError, e:
+            raise OperationalError, e
+        except Exception, e:
+            raise OperationalError, e
 
 
     def _fetchone(self, cursor):

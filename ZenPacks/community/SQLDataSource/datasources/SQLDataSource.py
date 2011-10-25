@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.2 2011/06/09 20:09:41 egor Exp $"""
+$Id: SQLDataSource.py,v 2.3 2011/10/25 19:18:20 egor Exp $"""
 
-__version__ = "$Revision: 2.2 $"[11:-2]
+__version__ = "$Revision: 2.3 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -203,7 +203,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             write('Executing query: "%s"'%sql)
             write('')
             cl = SQLClient()
-            rows = cl.syncQuery({'t':(sql, {}, cs, properties)}).get('t', [{}])
+            rows = cl.query({'t':(sql, {}, cs, properties)},True).get('t', [{}])
             cl = None
             if isinstance(rows[0], Failure): raise rows[0]
             write('|'.join(rows[0].keys()))

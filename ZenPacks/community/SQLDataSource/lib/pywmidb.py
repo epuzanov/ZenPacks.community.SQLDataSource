@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.2'
+__version__ = '1.4.3'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -341,7 +341,7 @@ class wmiCursor(object):
                 try:
                     self._kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(
                                                                     ',',where)))
-                    if True: #[v for v in self._kbs.values() if type(v) is list]:
+                    if [v for v in self._kbs.values() if type(v) is list]:
                         if props == '*': kbkeys = ''
                         else: kbkeys = ',%s'%','.join(self._kbs.keys())
                         operation='SELECT %s%s FROM %s'%(props,kbkeys,classname)

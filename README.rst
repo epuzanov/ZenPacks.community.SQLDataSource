@@ -58,12 +58,34 @@ Connection String
 -----------------
 Format the same as for adbapi.ConnectionPool: 'dbmodulename',*args,**kwargs
 
-Examples:
+**MySQLdb** connection string example:
 
     ::
 
         'MySQLdb',host='localhost',user='user',passwd='pwd',db='somedb'
+
+**pyodbc** connection string example:
+
+    ::
         'pyodbc','driver={MySQL};server=localhost;database=somedb;uid=user;pwd=pwd'
+
+**WMI** connection string example:
+
+    ::
+
+        'pywmidb',host='hostname',user='Domain\User',password='pwd',namespace='root/cimv2'
+
+**WBEM** connection string example:
+
+    ::
+
+        'pywbemdb',scheme='https',port=5989,host='hostname',user='user',password='pwd',namespace='root/cimv2'
+
+**WS-Management (WinRM2)** connection string example:
+
+    ::
+
+        'pywsmandb',scheme='http',port=5985,host='hostname',user='Domain\User',password='pwd',namespace='root/cimv2',path='/wsman'
 
 Columns name to Data Points name mapping
 ----------------------------------------
@@ -86,21 +108,25 @@ We have 3 databases ('events', 'information_schema' and 'mysql') and we need
 collect data and idx size of every database.
 
 DataSource Query for '**events**':
+
     ::
 
         SELECT sum(data_length) as dataSize, sum(index_length) as indexSize, sum( data_length + index_length ) as sizeUsed FROM TABLES WHERE table_schema='events' GROUP BY table_schema
 
 DataSource Query for '**mysql**':
+
     ::
 
          SELECT sum(data_length) as dataSize, sum(index_length) as indexSize, sum( data_length + index_length ) as sizeUsed FROM TABLES WHERE table_schema='mysql' GROUP BY table_schema
 
 DataSource Query for '**information_schema**':
+
     ::
 
          SELECT sum(data_length) as dataSize, sum(index_length) as indexSize, sum( data_length + index_length ) as sizeUsed FROM TABLES WHERE table_schema=' information_schema' GROUP BY table_schema
 
 As result 3 queries will be replaced by single query:
+
     ::
 
         SELECT sum(data_length) as dataSize, sum(index_length) as indexSize, sum( data_length + index_length ) as sizeUsed,table_schema FROM TABLES GROUP BY table_schema
@@ -126,6 +152,7 @@ Dictionary as Data Point Aliases formula
 before be saved in RRD, values will be evaluated
 
 Example:
+
     ::
 
         "Unknown":0,"Other":1,"OK":2,"Warning":3,"Error":4

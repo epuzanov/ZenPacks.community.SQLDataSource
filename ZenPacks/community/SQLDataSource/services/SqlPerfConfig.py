@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.3 2011/10/20 18:45:49 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.4 2011/10/25 16:28:35 egor Exp $"""
 
-__version__ = "$Revision: 2.3 $"[11:-2]
+__version__ = "$Revision: 2.4 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -51,6 +51,7 @@ class SqlPerfConfig(CollectorConfigService):
                     if not (isinstance(ds, DataSource) and ds.enabled):continue
                     sql, sqlp, kbs, cs = ds.getQueryInfo(comp)
                     if not sql: continue
+                    if sqlp and '_process where' in sql.lower(): sql = sqlp
                     tn = '/'.join([device.id, comp.id, templ.id, ds.id])
                     columns = {}
                     for dp in ds.getRRDDataPoints():
