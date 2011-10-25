@@ -67,6 +67,7 @@ Format the same as for adbapi.ConnectionPool: 'dbmodulename',*args,**kwargs
 **pyodbc** connection string example:
 
     ::
+
         'pyodbc','driver={MySQL};server=localhost;database=somedb;uid=user;pwd=pwd'
 
 **WMI** connection string example:
