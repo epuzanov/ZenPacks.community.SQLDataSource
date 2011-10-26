@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.4 2011/10/25 16:28:35 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.5 2011/10/26 20:26:18 egor Exp $"""
 
-__version__ = "$Revision: 2.4 $"[11:-2]
+__version__ = "$Revision: 2.5 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -47,6 +47,7 @@ class SqlPerfConfig(CollectorConfigService):
             try: basepath = comp.rrdPath()
             except: continue
             for templ in comp.getRRDTemplates():
+                dpnames = []
                 for ds in templ.getRRDDataSources():
                     if not (isinstance(ds, DataSource) and ds.enabled):continue
                     sql, sqlp, kbs, cs = ds.getQueryInfo(comp)
@@ -56,6 +57,7 @@ class SqlPerfConfig(CollectorConfigService):
                     columns = {}
                     for dp in ds.getRRDDataPoints():
                         dpname = dp.name()
+                        dpnames.append(dpname)
                         alias = (dp.aliases() or [dp])[0]
                         aname = alias.id.strip().upper()
                         if hasattr(alias, 'formula'):
@@ -73,7 +75,7 @@ class SqlPerfConfig(CollectorConfigService):
                                 (dp.rrdmin, dp.rrdmax)))
                     queries[tn] = (sqlp, kbs, cs, columns, sql)
 
-                dpn = set(templ.getRRDDataPointNames())
+                dpn = set(dpnames)
                 for thr in templ.thresholds():
                     if not (thr.enabled and dpn & set(thr.dsnames)): continue
                     proxy.thresholds.append(thr.createThresholdInstance(comp))

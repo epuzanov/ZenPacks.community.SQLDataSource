@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.4 2011/10/25 16:23:10 egor Exp $"""
+$Id: SQLPlugin.py,v 2.5 2011/10/26 19:41:01 egor Exp $"""
 
-__version__ = "$Revision: 2.4 $"[11:-2]
+__version__ = "$Revision: 2.5 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
@@ -44,8 +44,8 @@ class SQLPlugin(CollectorPlugin):
             cl.close()
             cl = None
             return results
-        except:
-            log.error("Error opening sql client")
+        except Exception, ex:
+            log.error("Error: %s", ex)
 
     def preprocess(self, results, log):
         newres = {}
