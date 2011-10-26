@@ -12,9 +12,9 @@ __doc__="""WMIQuery
 
 Gets WMI performance data.
 
-$Id: WMIQuery.py,v 1.0 2011/10/25 16:21:40 egor Exp $"""
+$Id: WMIQuery.py,v 1.1 2011/10/26 16:10:15 egor Exp $"""
 
-__version__ = "$Revision: 1.0 $"[11:-2]
+__version__ = "$Revision: 1.1 $"[11:-2]
 
 from pysamba.twisted.callback import WMIFailure
 from pysamba.wbem.Query import Query
@@ -63,14 +63,10 @@ class wmiQuery(object):
         for instances in self.resMaps.values():
             for tables in instances.values():
                 for (pname, table), props in tables:
-                    self.results.setdefault(pname,{})[table] = [err,]
+                    self.results[pname][table].append(err)
 
 
     def parseResult(self, instances):
-        for insts in self.resMaps.values():
-            for tables in insts.values():
-                for (pn, table), props in tables:
-                    self.results.setdefault(pn, {})[table] = []
         for instance in instances:
             for kbKey, kbVal in self.resMaps.iteritems():
                 cNames=set([k.upper() for k in kbVal.values()[0][0][1].keys()])
@@ -103,9 +99,7 @@ class wmiQuery(object):
                                                 float('%s.%s'%(g[5],g[6])), tz)
                         if not hasattr(anames, '__iter__'): anames=(anames,)
                         for aname in anames: result[aname] = res
-                    if result: self.results.setdefault(pn, {}).setdefault(
-                                                        table,[]).append(result)
-
+                    if result: self.results[pn][table].append(result)
 
     def run(self, pool):
         def inner(driver):

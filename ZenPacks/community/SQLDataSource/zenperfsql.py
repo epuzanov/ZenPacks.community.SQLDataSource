@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.5 2011/10/20 18:44:53 egor Exp $"""
+$Id: zenperfsql.py,v 2.6 2011/10/26 16:01:05 egor Exp $"""
 
-__version__ = "$Revision: 2.5 $"[11:-2]
+__version__ = "$Revision: 2.6 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -23,6 +23,9 @@ import Globals
 import zope.component
 import zope.interface
 from DateTime import DateTime
+
+from copy import copy
+import md5
 
 from twisted.internet import defer, reactor
 from twisted.python.failure import Failure
@@ -83,6 +86,92 @@ def rrpn(expression, value):
         return val//1
     except:
         return value
+
+
+class SubConfigurationTaskSplitter(SimpleTaskSplitter):
+    """
+    A drop-in replacement for original SubConfigurationTaskSplitter class.
+    A task splitter that creates a single scheduled task by
+    device, cycletime and other criteria.
+    """
+
+    subconfigName = 'datasources'
+
+    def makeConfigKey(self, config, subconfig):
+        raise NotImplementedError("Required method not implemented")
+
+    def _newTask(self, name, configId, interval, config):
+        """
+        Handle the dirty work of creating a task
+        """
+        self._taskFactory.reset()
+        self._taskFactory.name = name
+        self._taskFactory.configId = configId
+        self._taskFactory.interval = interval
+        self._taskFactory.config = config
+        return self._taskFactory.build()
+
+    def _splitSubConfiguration(self, config):
+        subconfigs = {}
+        for subconfig in getattr(config, self.subconfigName):
+            key = self.makeConfigKey(config, subconfig)
+            subconfigList = subconfigs.setdefault(key, [])
+            subconfigList.append(subconfig)
+        return subconfigs
+
+    def splitConfiguration(self, configs):
+        # This name required by ITaskSplitter interface
+        tasks = {}
+        for config in configs:
+            log.debug("Splitting config %s", config)
+
+            # Group all of the subtasks under the same configId
+            # so that updates clean up any previous tasks
+            # (including renames)
+            configId = config.id
+
+            subconfigs = self._splitSubConfiguration(config)
+            for key, subconfigGroup in subconfigs.items():
+                name = ' '.join(map(str, key))
+                interval = key[1]
+
+                configCopy = copy(config)
+                setattr(configCopy, self.subconfigName, subconfigGroup)
+
+                tasks[name] = self._newTask(name,
+                                            configId,
+                                            interval,
+                                            configCopy)
+        return tasks
+
+class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
+    """
+    A task splitter that creates a single scheduled task by
+    device, cycletime and other criteria.
+    """
+    subconfigName = 'datapoints'
+
+    def makeConfigKey(self, config, subconfig):
+        return (config.id, config.configCycleInterval,
+                md5.new(subconfig[0]).hexdigest())
+#                subconfig[0])
+
+    def _newTask(self, name, configId, interval, config):
+        """
+        Handle the dirty work of creating a task
+        """
+        queries = {}
+        cs = getattr(config, self.subconfigName)[0][0]
+        for tname, query in config.queries.iteritems():
+            if query[2] != cs: continue
+            queries[tname] = query
+        setattr(config, 'queries', queries)
+        self._taskFactory.reset()
+        self._taskFactory.name = name
+        self._taskFactory.configId = configId
+        self._taskFactory.interval = interval
+        self._taskFactory.config = config
+        return self._taskFactory.build()
 
 
 # Create an implementation of the ICollectorPreferences interface so that the
@@ -314,6 +403,6 @@ class ZenPerfSqlTask(ObservableMixin):
 if __name__ == '__main__':
     myPreferences = ZenPerfSqlPreferences()
     myTaskFactory = SimpleTaskFactory(ZenPerfSqlTask)
-    myTaskSplitter = SimpleTaskSplitter(myTaskFactory)
+    myTaskSplitter = ZenPerfSqlTaskSplitter(myTaskFactory)
     daemon = CollectorDaemon(myPreferences, myTaskSplitter)
     daemon.run()

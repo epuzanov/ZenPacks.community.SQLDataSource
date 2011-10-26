@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.8 2011/10/25 16:22:40 egor Exp $"""
+$Id: SQLClient.py,v 2.9 2011/10/26 16:09:22 egor Exp $"""
 
-__version__ = "$Revision: 2.8 $"[11:-2]
+__version__ = "$Revision: 2.9 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -83,7 +83,7 @@ class Query(object):
         for instances in self.resMaps.values():
             for tables in instances.values():
                 for (pname, table), props in tables:
-                    self.results.setdefault(pname,{})[table] = [err,]
+                    self.results[pname][table].append(err)
 
 
     def parseValue(self, value):
@@ -101,11 +101,6 @@ class Query(object):
 
     def parseResult(self, cursor):
         rows = {}
-        if not cursor.description:
-            for insts in resMaps.values():
-                for tables in insts.values():
-                    for (pn, table), props in tables:
-                        self.results.setdefault(pn, {})[table] = []
         header = [h[0].upper() for h in cursor.description]
         somerows = cursor.fetchmany()
         while somerows:
@@ -127,20 +122,18 @@ class Query(object):
                             if not hasattr(anames, '__iter__'): anames=(anames,)
                             for aname in anames:
                                 result[aname] = rDict.get(name.upper(), None)
-                        if result: self.results.setdefault(pn, {}).setdefault(
-                                                        table,[]).append(result)
+                        if result: self.results[pn][table].append(result)
             somerows = cursor.fetchmany()
         for kbVal in self.resMaps.values():
             for tables in kbVal.values():
                 for (pn, table), cols in tables:
-                    if table in self.results.get(pn, {}): continue
+                    if self.results[pn][table]: continue
                     result = {}
                     for name, anames in cols.iteritems():
                         val = self.parseValue(rows.get(name.upper(), None))
                         if not hasattr(anames, '__iter__'): anames=(anames,)
                         for aname in anames: result[aname] = val
-                    if result: self.results.setdefault(pn, {}).setdefault(
-                                                        table,[]).append(result)
+                    if result: self.results[pn][table].append(result)
 
 
     def run(self, dbpool):
@@ -271,6 +264,7 @@ class SQLClient(BaseClient):
                 elif 'pywmidb' in task[2]: queue.append(wmiPool(task[2]))
                 else: queue.append(Pool(task[2])) 
             queue[poolid].add(pname, tname, task, self)
+            self.results.setdefault(pname, {})[tname] = []
         if sync:
             for pool in queue:
                 pool.run()
