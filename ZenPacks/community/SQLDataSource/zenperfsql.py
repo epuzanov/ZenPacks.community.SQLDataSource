@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.6 2011/10/26 16:01:05 egor Exp $"""
+$Id: zenperfsql.py,v 2.7 2011/10/27 16:55:04 egor Exp $"""
 
-__version__ = "$Revision: 2.6 $"[11:-2]
+__version__ = "$Revision: 2.7 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -41,7 +41,7 @@ from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         TaskStates
 from Products.ZenEvents.ZenEventClasses import Error, Clear
 from Products.ZenUtils.observable import ObservableMixin
-from SQLClient import SQLClient, SQLPlugin
+from SQLClient import SQLClient
 
 # We retrieve our configuration data remotely via a Twisted PerspectiveBroker
 # connection. To do so, we need to import the class that will be used by the
@@ -314,9 +314,6 @@ class ZenPerfSqlTask(ObservableMixin):
         """
         self.state = ZenPerfSqlTask.STATE_SQLC_PROCESS
 
-        try: results = self._sqlc.getResults()[0][1]
-        except: pass
-
         log.debug("Successful collection from %s [%s], results=%s",
                   self._devId, self._manageIp, results)
         if not results: return None
@@ -387,9 +384,8 @@ class ZenPerfSqlTask(ObservableMixin):
 
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
 
-        self._sqlc = SQLClient( self._taskConfig, self,
-                                [SQLPlugin(self._taskConfig.queries.copy())])
-        d = self._sqlc.run()
+        self._sqlc = SQLClient()
+        d = self._sqlc.query(self._taskConfig.queries.copy())
         d.addCallbacks(self._collectSuccessful, self._failure)
 
         # returning a Deferred will keep the framework from assuming the task

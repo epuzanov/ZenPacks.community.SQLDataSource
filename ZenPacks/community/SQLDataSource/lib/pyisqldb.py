@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.3'
+__version__ = '1.0.4'
 
 from string import upper, strip
 import datetime
@@ -297,16 +297,16 @@ class isqlCnx:
         isqlcmd = 'iusql'
         kwargs.update(dict(map(strip, i.split('=')) for i in (
             args and args[0] or kwargs.pop('cs', '')).split(';') if '=' in i))
+        kwargs['DRIVER'] = kwargs.get('DRIVER', 'None').strip('{}')
         for k in kwargs.keys():
             ku = k.upper()
             if ku in ('UID', 'USER'): uid = kwargs.pop(k)
             elif ku in ('PWD', 'PASSWORD'): pwd = kwargs.pop(k)
             elif ku in ('DSN', 'FILEDSN'): dsn = kwargs.pop(k)
-            elif ku in ('HOST', 'SERVER'): kwargs['servername'] = kwargs[k]
+            elif ku in ('SERVER', 'HOST') and kwargs['DRIVER'] == 'PostgreSQL':
+                kwargs['servername'] = kwargs.pop(k)
             elif ku == 'ANSI':
-                ansi = kwargs.pop(k)
-                if ansi.upper() == 'TRUE': isqlcmd = 'isql'
-        kwargs['DRIVER'] = kwargs.get('DRIVER', 'None').strip('{}')
+                isqlcmd=str(kwargs.pop(k)).upper()=='TRUE' and 'isql' or 'iusql'
         if not dsn:
             import md5
             newcs = ';'.join(('%s = %s' %o for o in kwargs.iteritems()))

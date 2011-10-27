@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.9 2011/10/26 16:09:22 egor Exp $"""
+$Id: SQLClient.py,v 2.10 2011/10/27 16:54:14 egor Exp $"""
 
-__version__ = "$Revision: 2.9 $"[11:-2]
+__version__ = "$Revision: 2.10 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -56,11 +56,11 @@ def _filename(device):
 
 class Query(object):
 
-    def __init__(self, sqlp, client):
+    def __init__(self, sqlp, results):
         self.sql = ''
         self.sqlp = sqlp
         self.resMaps = {}
-        self.results = client.results
+        self.results = results
 
 
     def add(self, pname, tname, task):
@@ -238,7 +238,7 @@ class SQLClient(BaseClient):
         self.device = device
         self.datacollector = datacollector
         self.plugins = plugins
-        self.results = {}
+        self.results = []
 
 
     def __del__(self):
@@ -247,11 +247,12 @@ class SQLClient(BaseClient):
 
     def close(self):
         del self.plugins[:]
-        self.results.clear()
+        del self.results[:]
 
 
     def query(self, tasks={}, sync=False):
         queue = []
+        results = {}
         for tname, task in tasks.iteritems():
             if type(tname) is tuple: pname, tname = tname
             else: pname = None
@@ -263,23 +264,25 @@ class SQLClient(BaseClient):
                 if sync: queue.append(syncPool(task[2]))
                 elif 'pywmidb' in task[2]: queue.append(wmiPool(task[2]))
                 else: queue.append(Pool(task[2])) 
-            queue[poolid].add(pname, tname, task, self)
-            self.results.setdefault(pname, {})[tname] = []
+            results.setdefault(pname, {})[tname] = []
+            queue[poolid].add(pname, tname, task, results)
         if sync:
             for pool in queue:
                 pool.run()
-            return self.results.get(None, {})
+            return results.pop(None, results)
         def inner(driver):
             for pool in queue:
                 yield pool.run()
                 driver.next()
-            yield defer.succeed(self.results)
+            yield defer.succeed(results.pop(None, results))
             driver.next()
         return drive(inner)
 
 
     def run(self):
-        def finish(result):
+        def finish(results):
+            for pl in self.plugins:
+                self.results.append((pl, results.pop(pl.name(), {})))
             if self.datacollector:
                 self.datacollector.clientFinished(self)
             else:
@@ -297,7 +300,7 @@ class SQLClient(BaseClient):
     def getResults(self):
         """Return data for this client
         """
-        return [(pl, self.results.get(pl.name(), {})) for pl in self.plugins]
+        return self.results
 
 
 
