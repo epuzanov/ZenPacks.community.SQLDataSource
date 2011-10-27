@@ -20,8 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.2'
+__version__ = '1.0.3'
 
+from string import upper, strip
 import datetime
 import subprocess
 import os
@@ -291,32 +292,36 @@ class isqlCnx:
     """
     def __init__(self, *args, **kwargs):
         dsn = None
-        uid = kwargs.get('uid', None)
-        pwd = kwargs.get('pwd', None)
-        options = {}
-        for item in kwargs.get('cs', args[0]).split(';'):
-            var, val = tuple([i.strip() for i in item.split('=')])
-            if var.upper() == 'UID' and not uid: uid = val
-            elif var.upper() == 'PWD' and not pwd: pwd = val
-            elif var.upper() == 'DSN': dsn = val
-            elif var.upper() == 'FILEDSN': dsn = val
-            elif var.upper() == 'DRIVER': options[var] = val.strip('{}')
-            else: options[var] = val
+        uid = None
+        pwd = None
+        isqlcmd = 'iusql'
+        kwargs.update(dict(map(strip, i.split('=')) for i in (
+            args and args[0] or kwargs.pop('cs', '')).split(';') if '=' in i))
+        for k in kwargs.keys():
+            ku = k.upper()
+            if ku in ('UID', 'USER'): uid = kwargs.pop(k)
+            elif ku in ('PWD', 'PASSWORD'): pwd = kwargs.pop(k)
+            elif ku in ('DSN', 'FILEDSN'): dsn = kwargs.pop(k)
+            elif ku in ('HOST', 'SERVER'): kwargs['servername'] = kwargs[k]
+            elif ku == 'ANSI':
+                ansi = kwargs.pop(k)
+                if ansi.upper() == 'TRUE': isqlcmd = 'isql'
+        kwargs['DRIVER'] = kwargs.get('DRIVER', 'None').strip('{}')
         if not dsn:
             import md5
-            newcs = ';'.join(['%s = %s'%o for o in options.iteritems()])
+            newcs = ';'.join(('%s = %s' %o for o in kwargs.iteritems()))
             dsn = md5.new(newcs).hexdigest()
             f = open(os.path.expanduser('~/.odbc.ini'), 'a+')
             while True:
                 line = f.readline()
                 if not line:
-                    f.write('[%s]\n'%dsn)
-                    for option in options.iteritems():
-                        f.write('%s = %s\n'%option)
+                    f.write('[%s]\n' % dsn)
+                    for param in kwargs.iteritems():
+                        f.write('%s = %s\n' % param)
                     break
-                if line.startswith('[%s]'%dsn): break
+                if line.startswith('[%s]' % dsn): break
             f.close()
-        self._args =  ["isql", dsn, "-c", "-b"]
+        self._args =  [isqlcmd, dsn, "-c", "-b"]
         if uid:
             self._args.insert(2, uid)
             if pwd: self._args.insert(3, pwd)
