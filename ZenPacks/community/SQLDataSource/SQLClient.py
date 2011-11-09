@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.11 2011/11/09 20:44:16 egor Exp $"""
+$Id: SQLClient.py,v 2.12 2011/11/09 20:58:31 egor Exp $"""
 
-__version__ = "$Revision: 2.11 $"[11:-2]
+__version__ = "$Revision: 2.12 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -100,6 +100,7 @@ class Query(object):
 
 
     def parseResult(self, cursor):
+        if not cursor.description: return
         rows = {}
         header = [h[0].upper() for h in cursor.description]
         somerows = cursor.fetchmany()
