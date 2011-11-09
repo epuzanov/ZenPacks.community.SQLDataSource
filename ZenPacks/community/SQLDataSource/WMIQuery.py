@@ -12,9 +12,9 @@ __doc__="""WMIQuery
 
 Gets WMI performance data.
 
-$Id: WMIQuery.py,v 1.2 2011/10/27 16:54:34 egor Exp $"""
+$Id: WMIQuery.py,v 1.3 2011/11/07 21:20:37 egor Exp $"""
 
-__version__ = "$Revision: 1.2 $"[11:-2]
+__version__ = "$Revision: 1.3 $"[11:-2]
 
 from pysamba.twisted.callback import WMIFailure
 from pysamba.wbem.Query import Query
@@ -181,7 +181,6 @@ class wmiPool(object):
                             "zWinPassword zProperties before adding devices.")
                 raise BadCredentials("Username is empty")
             log.debug("connect to %s, user %s", self.host, self.user)
-            pool = None
             try:
                 pool = Query()
                 yield pool.connect(eventContext, self.host, self.host,
@@ -190,6 +189,7 @@ class wmiPool(object):
             except Exception, ex:
                 log.debug("Exception collecting query: %s", str(ex))
                 if hasattr(pool, 'close'): pool.close()
+                pool = None
                 raise
             for query in self.queries:
                 try:
@@ -197,4 +197,5 @@ class wmiPool(object):
                     driver.next()
                 except: continue
             pool.close()
+            pool = None
         return drive(inner)

@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.10 2011/10/27 16:54:14 egor Exp $"""
+$Id: SQLClient.py,v 2.11 2011/11/09 20:44:16 egor Exp $"""
 
-__version__ = "$Revision: 2.10 $"[11:-2]
+__version__ = "$Revision: 2.11 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -197,6 +197,7 @@ class Pool(object):
                 yield query.run(dbpool)
                 driver.next()
             dbpool.close()
+            dbpool = None
         return drive(inner)
 
 

@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.7 2011/10/27 16:55:04 egor Exp $"""
+$Id: zenperfsql.py,v 2.8 2011/11/07 21:21:21 egor Exp $"""
 
-__version__ = "$Revision: 2.7 $"[11:-2]
+__version__ = "$Revision: 2.8 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -199,10 +199,21 @@ class ZenPerfSqlPreferences(object):
         parser.add_option('--debug', dest='debug', default=False,
                                action='store_true',
                                help='Increase logging verbosity.')
+        parser.add_option('--ntlmv2auth',
+                               dest='ntlmv2auth',
+                               default=False,
+                               action="store_true",
+                               help="Enable NTLMv2 Authentication for Windows Devices")
+
 
     def postStartup(self):
         # turn on debug logging if requested
         logseverity = self.options.logseverity
+
+        if getattr(self.options, 'ntlmv2auth', False): flag = True
+        else: flag = False
+        pysamba.twisted.reactor.setNTLMv2Authentication(flag)
+
 
 class ZenPerfSqlTask(ObservableMixin):
     zope.interface.implements(IScheduledTask)
