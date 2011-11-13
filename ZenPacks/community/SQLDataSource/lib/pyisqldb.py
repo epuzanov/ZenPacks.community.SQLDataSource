@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.4'
+__version__ = '1.0.5'
 
 from string import upper, strip
 import datetime
@@ -149,7 +149,7 @@ class isqlCursor(object):
         """
         Initialize a Cursor object. connection is a wsmanCnx object instance.
         """
-        self.connection = connection
+        self._args = connection._args
         self.rowcount = 0
         self.rownumber = -1
         self.arraysize = 1
@@ -164,10 +164,8 @@ class isqlCursor(object):
         return self._description
 
     def _check_executed(self):
-        if not self.connection:
-            raise InterfaceError, "Connection closed."
         if not self._description and self._queue:
-            self.connection._commit(self)
+            self._commit(self)
         if not self._description:
             raise OperationalError, "No data available. execute() first."
 
@@ -182,6 +180,74 @@ class isqlCursor(object):
         del self._rows[:]
         del self._queue[:]
 
+    def _convert(self, value):
+        value = str(value).strip()
+        if value.isdigit(): return long(value)
+        if value.replace('.', '', 1).isdigit(): return float(value)
+        if value.lower() == 'false': return False
+        if value.lower() == 'true': return True
+        r = DTPAT.match(value)
+        if not r: return str(value)
+        return datetime.datetime(*map(int, r.groups(0)))
+
+    def _commit(self, cursor):
+        """
+        Commit transaction which is currently in progress.
+        """
+        if self._queue == []: return
+        rows = []
+        tCount = 0
+        cMap = []
+        try:
+            p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            stdout=subprocess.PIPE)
+            queries = [q.strip().replace('\n',' ') for q in self._queue]
+            del self._queue[:]
+            lines, err = p.communicate('%s\n'%'\n'.join(queries))
+            if err: raise OperationalError, ('00000', err.strip())
+            for line in lines.splitlines():
+                if line.startswith('[ISQL]INFO:'): pass
+                elif line.strip() == '': pass
+                elif line.startswith('+---'):
+                    if tCount == 3:
+                        tCount = 0
+                        del rows[:]
+                    if tCount == 0:
+                        cMap = map(len, line[2:-2].split('+-'))
+                    tCount += 1
+                elif line.startswith('| '):
+                    props = []
+                    cEnd = 0
+                    for cLen in cMap:
+                        cStart = cEnd + 2
+                        cEnd = cStart + cLen
+                        if tCount == 2:
+                            props.append(self._convert(line[cStart:cEnd]))
+                        else:
+                            props.append(line[cStart:cEnd])
+                    rows.append(tuple(props))
+            if len(rows) < 2: return
+            descr = []
+            for col, value in zip(rows[0], rows[1]):
+                cName = col.strip()
+                maxlen = None
+                cType = 1
+                if type(value) == str:
+                    if len(col) > len(cName): maxlen = len(col)
+                    cType = 0
+                elif type(value) == datetime.datetime: cType = 2
+                elif type(value) == bool: cType = 3
+                descr.append((cName, cType, maxlen, maxlen, None, None, None))
+            self._description = tuple(descr)
+            self._rows.extend(rows[1:])
+            self.rowcount = len(self._rows)
+            self.rownumber = 0
+        except OperationalError, e:
+            raise OperationalError, e
+        except Exception, e:
+            raise OperationalError, e
+
     def execute(self, operation, *args):
         """
         Prepare and execute a database operation (query or command).
@@ -193,7 +259,7 @@ class isqlCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not self.connection:
+        if not self._args:
             raise InterfaceError, "Connection closed."
         self._description = None
         del self._rows[:]
@@ -231,36 +297,35 @@ class isqlCursor(object):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
         self._check_executed()
-        return self.connection._fetchone(self)
+        if not self._rows: return None
+        self.rownumber += 1
+        return self._rows.pop(0)
 
     def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if not size: size = self.arraysize
+        if size: size += self.rownumber
+        else: size = self.arraysize + self.rownumber
         results = []
-        row = self.connection._fetchone(self)
-        while row:
-            results.append(row)
-            size -= 1
-            if size == 0: break
-            row = self.connection._fetchone(self)
+        while self._rows and self.rownumber < size:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
         return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
         self._check_executed()
         results = []
-        row = self.connection._fetchone(self)
-        while row:
-            results.append(row)
-            row = self.connection._fetchone(self)
+        while self._rows:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
         return results
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        row = self.connection._fetchone(self)
+        row = self.fetchone()
         if not row: raise StopIteration
         return row
 
@@ -284,6 +349,7 @@ class isqlCursor(object):
         """
         self._check_executed()
 
+
 ### connection object
 
 class isqlCnx:
@@ -294,7 +360,7 @@ class isqlCnx:
         dsn = None
         uid = None
         pwd = None
-        isqlcmd = 'iusql'
+        isqlcmd = 'isql'
         kwargs.update(dict(map(strip, i.split('=')) for i in (
             args and args[0] or kwargs.pop('cs', '')).split(';') if '=' in i))
         kwargs['DRIVER'] = kwargs.get('DRIVER', 'None').strip('{}')
@@ -306,7 +372,7 @@ class isqlCnx:
             elif ku in ('SERVER', 'HOST') and kwargs['DRIVER'] == 'PostgreSQL':
                 kwargs['servername'] = kwargs.pop(k)
             elif ku == 'ANSI':
-                isqlcmd=str(kwargs.pop(k)).upper()=='TRUE' and 'isql' or 'iusql'
+                isqlcmd=upper(str(kwargs.pop(k)))=='FALSE' and 'iusql' or 'isql'
         if not dsn:
             import md5
             newcs = ';'.join(('%s = %s' %o for o in kwargs.iteritems()))
@@ -337,86 +403,6 @@ class isqlCnx:
         all uncommitted transactions.
         """
         pass
-
-
-    def _convert(self, value):
-        value = str(value).strip()
-        if value.isdigit(): return long(value)
-        if value.replace('.', '', 1).isdigit(): return float(value)
-        if value.lower() == 'false': return False
-        if value.lower() == 'true': return True
-        r = DTPAT.match(value)
-        if not r: return str(value)
-        return datetime.datetime(*map(int, r.groups(0)))
-
-
-    def _commit(self, cursor):
-        """
-        Commit transaction which is currently in progress.
-        """
-        if cursor._queue == []: return
-        rows = []
-        tCount = 0
-        cMap = []
-        try:
-            p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
-                                            stderr=subprocess.PIPE,
-                                            stdout=subprocess.PIPE)
-            queries = [q.strip().replace('\n',' ') for q in cursor._queue]
-            del cursor._queue[:]
-            lines, err = p.communicate('%s\n'%'\n'.join(queries))
-            if err: raise OperationalError, ('00000', err.strip())
-            for line in lines.splitlines():
-                if line.startswith('[ISQL]INFO:'): pass
-                elif line.strip() == '': pass
-                elif line.startswith('+---'):
-                    if tCount == 3:
-                        tCount = 0
-                        del rows[:]
-                    if tCount == 0:
-                        cMap = map(len, line[2:-2].split('+-'))
-                    tCount += 1
-                elif line.startswith('| '):
-                    props = []
-                    cEnd = 0
-                    for cLen in cMap:
-                        cStart = cEnd + 2
-                        cEnd = cStart + cLen
-                        if tCount == 2:
-                            props.append(self._convert(line[cStart:cEnd]))
-                        else:
-                            props.append(line[cStart:cEnd])
-                    rows.append(tuple(props))
-            if len(rows) < 2: return
-            descr = []
-            for col, value in zip(rows[0], rows[1]):
-                cName = col.strip()
-                if type(value) == str:
-                    maxlen = len(col) > len(cName) and len(col) or None
-                    descr.append((cName, 0, maxlen, maxlen,None,None,None))
-                elif type(value) == datetime.datetime:
-                    descr.append((cName, 2, None, None, None, None, None))
-                elif type(value) == bool:
-                    descr.append((cName, 3, None, None, None, None, None))
-                else:
-                    descr.append((cName, 1, None, None, None, None, None))
-            cursor._description = tuple(descr)
-            cursor._rows.extend(rows[1:])
-            cursor.rowcount = len(cursor._rows)
-            cursor.rownumber = 0
-        except OperationalError, e:
-            raise OperationalError, e
-        except Exception, e:
-            raise OperationalError, e
-
-
-    def _fetchone(self, cursor):
-        """Fetches a single row from the cursor rows cache. None indicates that
-        no more rows are available."""
-        if cursor._rows:
-            cursor.rownumber += 1
-            return cursor._rows.pop(0)
-        else: return None
 
     def commit(self):
         """
