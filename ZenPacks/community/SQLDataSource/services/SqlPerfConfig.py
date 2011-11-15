@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.5 2011/10/26 20:26:18 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.6 2011/11/14 21:39:43 egor Exp $"""
 
-__version__ = "$Revision: 2.5 $"[11:-2]
+__version__ = "$Revision: 2.6 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -38,7 +38,6 @@ class SqlPerfConfig(CollectorConfigService):
         proxy.configCycleInterval = self._prefs.perfsnmpCycleInterval
         proxy.datapoints = []
         proxy.thresholds = []
-        qIdx = {}
         queries = {}
         log.debug('device: %s', device)
         try: perfServer = device.getPerformanceServer()
@@ -54,26 +53,24 @@ class SqlPerfConfig(CollectorConfigService):
                     if not sql: continue
                     if sqlp and '_process where' in sql.lower(): sql = sqlp
                     tn = '/'.join([device.id, comp.id, templ.id, ds.id])
-                    columns = {}
+                    aliases = set()
                     for dp in ds.getRRDDataPoints():
                         dpname = dp.name()
                         dpnames.append(dpname)
                         alias = (dp.aliases() or [dp])[0]
                         aname = alias.id.strip().upper()
-                        if hasattr(alias, 'formula'):
-                            expr = talesEval("string:%s"%alias.formula, comp,
-                                                        extra={'now':'now'})
-                        else: expr = None
-                        if aname not in columns: columns[aname] = []
-                        columns[aname].append(dp.id)
-                        proxy.datapoints.append((cs, tn, dp.id,
+                        formula = getattr(alias, 'formula', None)
+                        expr = formula and talesEval("string:%s"%alias.formula,
+                                            comp, extra={'now':'now'}) or None
+                        aliases.add(aname)
+                        proxy.datapoints.append(((cs, sqlp), tn, dp.id, aname,
                                 isinstance(comp, Device) and "" or comp.id,
                                 expr,
                                 "/".join((basepath, dpname)),
                                 dp.rrdtype,
                                 dp.getRRDCreateCommand(perfServer),
                                 (dp.rrdmin, dp.rrdmax)))
-                    queries[tn] = (sqlp, kbs, cs, columns, sql)
+                    queries[tn] = (sqlp,kbs,cs,dict(zip(aliases,aliases)),sql)
 
                 dpn = set(dpnames)
                 for thr in templ.thresholds():

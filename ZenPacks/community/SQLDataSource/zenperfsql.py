@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.8 2011/11/07 21:21:21 egor Exp $"""
+$Id: zenperfsql.py,v 2.9 2011/11/14 22:13:04 egor Exp $"""
 
-__version__ = "$Revision: 2.8 $"[11:-2]
+__version__ = "$Revision: 2.9 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -153,17 +153,17 @@ class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
 
     def makeConfigKey(self, config, subconfig):
         return (config.id, config.configCycleInterval,
-                md5.new(subconfig[0]).hexdigest())
-#                subconfig[0])
+                md5.new(' '.join(subconfig[0])).hexdigest())
+#                ' '.join(subconfig[0]))
 
     def _newTask(self, name, configId, interval, config):
         """
         Handle the dirty work of creating a task
         """
         queries = {}
-        cs = getattr(config, self.subconfigName)[0][0]
+        cs, sqlp = getattr(config, self.subconfigName)[0][0]
         for tname, query in config.queries.iteritems():
-            if query[2] != cs: continue
+            if query[2] != cs or query[0] != sqlp: continue
             queries[tname] = query
         setattr(config, 'queries', queries)
         self._taskFactory.reset()
@@ -331,7 +331,7 @@ class ZenPerfSqlTask(ObservableMixin):
 
 
         compstatus = {}
-        for cs,tn,dpname,comp,expr,rrdPath,rrdType,rrdC,mm in self._datapoints:
+        for cs,tn,dpname,alias,comp,expr,rrdPath,rrdType,rrdC,mm in self._datapoints:
             values = []
             compstatus[comp] = Clear
             for d in results.get(tn, []):
@@ -339,7 +339,7 @@ class ZenPerfSqlTask(ObservableMixin):
                     compstatus[comp] = d
                     break
                 if len(d) == 0: continue
-                dpvalue = d.get(dpname, None)
+                dpvalue = d.get(alias, None)
                 if dpvalue == None or dpvalue == '': continue
                 elif type(dpvalue) is list: dpvalue = dpvalue[0]
                 elif isinstance(dpvalue, DateTime): dpvalue = dpvalue._t
@@ -363,8 +363,7 @@ class ZenPerfSqlTask(ObservableMixin):
             elif dpname.endswith('_first'): value = values[0]
             elif dpname.endswith('_last'): value = values[-1]
             else: value = sum(values) / len(values)
-            try:
-                self._dataService.writeRRD( rrdPath,
+            try: self._dataService.writeRRD(rrdPath,
                                             float(value),
                                             rrdType,
                                             rrdC,

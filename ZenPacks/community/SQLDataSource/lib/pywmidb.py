@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.3'
+__version__ = '1.4.4'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -154,7 +154,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module may be shared, but not connections
-threadsafety = 2
+threadsafety = 1
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -224,28 +224,29 @@ class wmiCursor(object):
     def __del__(self):
         self.close()
 
-    def _close(self):
+    def _release(self):
         """
         Release Enumerator and reset objects buffer.
         """
-        if getattr(self._count, 'value', 0) > 0:
+        self._kbs.clear()
+        self.description = None
+        if self._pEnum:
             try: result = library.IUnknown_Release(self._pEnum,
                             self.connection._ctx)
             except: pass
+        self._pEnum = None
         if self._objs != None:
-            for i in range(self.arraysize):
-                talloc_free(self._objs[i]) 
+            for i in range(self._curObj, self._count.value):
+                talloc_free(self._objs[i])
+        self._curObj = 0
+        self._objs = None
 
     def close(self):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
-        self._close()
-        self._kbs.clear()
-        self._objs = None
-        self._pEnum = None
+        self._release()
         self._count = None
-        self.description = None
 
     def _convertArray(self, arr):
         """
@@ -312,10 +313,8 @@ class wmiCursor(object):
         """
         if not getattr(self.connection, '_ctx', None):
             raise InterfaceError("Connection closed.")
-        self.description = None
+        self._release()
         self.rownumber = -1
-        self._curObj = 0
-        self._kbs.clear()
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -328,11 +327,7 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            if self._count.value > 0:
-                result = library.IUnknown_Release(self._pEnum,
-                            self.connection._ctx)
-#                WERR_CHECK(result, self._host, "Release")
-            del self._pEnum
+            
             self._pEnum = POINTER(IEnumWbemClassObject)()
             self._objs = (POINTER(WbemClassObject) * self.arraysize)()
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
@@ -485,6 +480,7 @@ class wmiCursor(object):
                             self._objs,
                             byref(self._count))
                 WERR_CHECK(result,self._host,"Retrieve result data.")
+            return results
 
         except WError, e:
             self.close()
@@ -492,67 +488,10 @@ class wmiCursor(object):
         except Exception, e:
             self.close()
             raise OperationalError(e)
-        return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
-        self._check_executed()
-        results = []
-        props = [p[0].upper() for p in self.description]
-        try:
-            while self._count.value != 0:
-                for self._curObj in range(self._curObj, self._count.value):
-                    iPath = []
-                    klass = self._objs[self._curObj].contents.obj_class.contents
-                    inst = self._objs[self._curObj].contents.instance.contents
-                    pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
-                        '__NAMESPACE':getattr(self._objs[self._curObj].contents,
-                                            '__NAMESPACE','').replace('\\','/')}
-                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                        prop = klass.properties[j]
-                        if not prop.name: continue
-                        uName = prop.name.upper()
-                        pType = prop.desc.contents.cimtype & CIM_TYPEMASK
-                        pVal = self._convert(inst.data[j], pType)
-                        pdict[uName] = pVal
-                        if self._kbs.get(prop.name, pVal) != pVal:
-                            pdict.clear()
-                            break
-                        if '__PATH' not in props: continue
-                        for i in range(prop.desc.contents.qualifiers.count):
-                            q = prop.desc.contents.qualifiers.item[i].contents
-                            if q.name not in ['key']: continue
-                            if pType == NUMBER:
-                                iPath.append('%s=%s'%(prop.name, pVal))
-                            else:
-                                iPath.append('%s="%s"'%(prop.name, pVal))
-                    talloc_free(self._objs[self._curObj]) 
-                    if not pdict: continue
-                    if '__PATH' in props:
-                        pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
-                                                            ','.join(iPath))
-                    results.append(tuple([pdict.get(p, None) for p in props]))
-                    pdict.clear()
-                    self.rownumber += 1
-                self._curObj = 0
-                del self._objs
-                self._objs = (POINTER(WbemClassObject) * self.arraysize)()
-                result = library.IEnumWbemClassObject_SmartNext(
-                            self._pEnum,
-                            self.connection._ctx,
-                            -1,
-                            self.arraysize,
-                            self._objs,
-                            byref(self._count))
-                WERR_CHECK(result,self._host,"Retrieve result data.")
-
-        except WError, e:
-            self.close()
-            raise OperationalError(e)
-        except Exception, e:
-            self.close()
-            raise OperationalError(e)
-        return results
+        return self.fetchmany(size=-1)
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
@@ -627,8 +566,6 @@ class pysambaCnx:
         except Exception, e:
             self.close()
             raise InterfaceError(e)
-
-
 
     def __del__(self):
         self.close()

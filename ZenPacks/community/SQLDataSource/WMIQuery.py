@@ -80,7 +80,7 @@ class wmiQuery(object):
                         properties = instance.__dict__.keys()
                     if type(properties) is not dict:
                         properties = dict(zip(properties, properties))
-                    for name, anames in properties.iteritems():
+                    for name, alias in properties.iteritems():
                         if name is '_class_name': continue
                         res = getattr(instance, name.lower(), None)
                         if type(res) is str:
@@ -96,8 +96,7 @@ class wmiQuery(object):
                                 res = DateTime(int(g[0]), int(g[1]), int(g[2]),
                                                 int(g[3]),int(g[4]),
                                                 float('%s.%s'%(g[5],g[6])), tz)
-                        if not hasattr(anames, '__iter__'): anames=(anames,)
-                        for aname in anames: result[aname] = res
+                        result[alias] = res
                     if result: self.results[pn][table].append(result)
 
     def run(self, pool):

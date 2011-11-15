@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.13 2011/11/13 17:42:31 egor Exp $"""
+$Id: SQLClient.py,v 2.14 2011/11/14 21:40:14 egor Exp $"""
 
-__version__ = "$Revision: 2.13 $"[11:-2]
+__version__ = "$Revision: 2.14 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -119,10 +119,8 @@ class Query(object):
                         kIdx.append(str(kbV).upper())
                     for (pn, table), cols in kbVal.get(tuple(kIdx), []):
                         result = {}
-                        for name, anames in cols.iteritems():
-                            if not hasattr(anames, '__iter__'): anames=(anames,)
-                            for aname in anames:
-                                result[aname] = rDict.get(name.upper(), None)
+                        for name, alias in cols.iteritems():
+                            result[alias] = rDict.get(name.upper(),'')
                         if result: self.results[pn][table].append(result)
             somerows = cursor.fetchmany()
         for kbVal in self.resMaps.values():
@@ -130,10 +128,8 @@ class Query(object):
                 for (pn, table), cols in tables:
                     if self.results[pn][table]: continue
                     result = {}
-                    for name, anames in cols.iteritems():
-                        val = self.parseValue(rows.get(name.upper(), None))
-                        if not hasattr(anames, '__iter__'): anames=(anames,)
-                        for aname in anames: result[aname] = val
+                    for name, alias in cols.iteritems():
+                        result[alias]=self.parseValue(rows.get(name.upper(),''))
                     if result: self.results[pn][table].append(result)
 
 
