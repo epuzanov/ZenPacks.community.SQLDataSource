@@ -63,19 +63,6 @@ WBEM_S_TIMEDOUT = 0x40004L
 
 WERR_BADFUNC = 1
 
-if not library.lp_loaded():
-    library.lp_load()
-    library.dcerpc_init()
-    library.dcerpc_table_init()
-    library.dcom_proxy_IUnknown_init()
-    library.dcom_proxy_IWbemLevel1Login_init()
-    library.dcom_proxy_IWbemServices_init()
-    library.dcom_proxy_IEnumWbemClassObject_init()
-    library.dcom_proxy_IRemUnknown_init()
-    library.dcom_proxy_IWbemFetchSmartEnum_init()
-    library.dcom_proxy_IWbemWCOSmartEnum_init()
-
-
 class DBAPITypeObject:
     def __init__(self,*values):
         self.values = values
@@ -327,7 +314,6 @@ class wmiCursor(object):
             operation = operation%args[0]
 
         try:
-            
             self._pEnum = POINTER(IEnumWbemClassObject)()
             self._objs = (POINTER(WbemClassObject) * self.arraysize)()
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
@@ -532,6 +518,17 @@ class pysambaCnx:
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wmibatchSize = kwargs.get('wmibatchSize', 5)
+        if not library.lp_loaded():
+            library.lp_load()
+            library.dcerpc_init()
+            library.dcerpc_table_init()
+            library.dcom_proxy_IUnknown_init()
+            library.dcom_proxy_IWbemLevel1Login_init()
+            library.dcom_proxy_IWbemServices_init()
+            library.dcom_proxy_IEnumWbemClassObject_init()
+            library.dcom_proxy_IRemUnknown_init()
+            library.dcom_proxy_IWbemFetchSmartEnum_init()
+            library.dcom_proxy_IWbemWCOSmartEnum_init()
 
         try:
             library.com_init_ctx(byref(self._ctx), None)

@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.6 2011/11/14 21:39:43 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.7 2011/11/20 14:19:38 egor Exp $"""
 
-__version__ = "$Revision: 2.6 $"[11:-2]
+__version__ = "$Revision: 2.7 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -54,6 +54,7 @@ class SqlPerfConfig(CollectorConfigService):
                     if sqlp and '_process where' in sql.lower(): sql = sqlp
                     tn = '/'.join([device.id, comp.id, templ.id, ds.id])
                     aliases = set()
+                    sortkey = (cs, sqlp)
                     for dp in ds.getRRDDataPoints():
                         dpname = dp.name()
                         dpnames.append(dpname)
@@ -63,14 +64,15 @@ class SqlPerfConfig(CollectorConfigService):
                         expr = formula and talesEval("string:%s"%alias.formula,
                                             comp, extra={'now':'now'}) or None
                         aliases.add(aname)
-                        proxy.datapoints.append(((cs, sqlp), tn, dp.id, aname,
+                        proxy.datapoints.append((sortkey, tn, dp.id, aname,
                                 isinstance(comp, Device) and "" or comp.id,
                                 expr,
                                 "/".join((basepath, dpname)),
                                 dp.rrdtype,
                                 dp.getRRDCreateCommand(perfServer),
                                 (dp.rrdmin, dp.rrdmax)))
-                    queries[tn] = (sqlp,kbs,cs,dict(zip(aliases,aliases)),sql)
+                    queries.setdefault(sortkey, {})[tn] = (sqlp, kbs, cs,
+                                                dict(zip(aliases,aliases)), sql)
 
                 dpn = set(dpnames)
                 for thr in templ.thresholds():

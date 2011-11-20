@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.9 2011/11/14 22:13:04 egor Exp $"""
+$Id: zenperfsql.py,v 2.10 2011/11/20 14:20:05 egor Exp $"""
 
-__version__ = "$Revision: 2.9 $"[11:-2]
+__version__ = "$Revision: 2.10 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -155,23 +155,6 @@ class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
         return (config.id, config.configCycleInterval,
                 md5.new(' '.join(subconfig[0])).hexdigest())
 #                ' '.join(subconfig[0]))
-
-    def _newTask(self, name, configId, interval, config):
-        """
-        Handle the dirty work of creating a task
-        """
-        queries = {}
-        cs, sqlp = getattr(config, self.subconfigName)[0][0]
-        for tname, query in config.queries.iteritems():
-            if query[2] != cs or query[0] != sqlp: continue
-            queries[tname] = query
-        setattr(config, 'queries', queries)
-        self._taskFactory.reset()
-        self._taskFactory.name = name
-        self._taskFactory.configId = configId
-        self._taskFactory.interval = interval
-        self._taskFactory.config = config
-        return self._taskFactory.build()
 
 
 # Create an implementation of the ICollectorPreferences interface so that the
@@ -395,7 +378,7 @@ class ZenPerfSqlTask(ObservableMixin):
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
 
         self._sqlc = SQLClient()
-        d = self._sqlc.query(self._taskConfig.queries.copy())
+        d = self._sqlc.query(self._taskConfig.queries[self._datapoints[0][0]])
         d.addCallbacks(self._collectSuccessful, self._failure)
 
         # returning a Deferred will keep the framework from assuming the task
