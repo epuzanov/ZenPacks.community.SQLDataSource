@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.7 2011/11/20 14:19:38 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.8 2011/11/29 23:18:36 egor Exp $"""
 
-__version__ = "$Revision: 2.7 $"[11:-2]
+__version__ = "$Revision: 2.8 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -54,7 +54,7 @@ class SqlPerfConfig(CollectorConfigService):
                     if sqlp and '_process where' in sql.lower(): sql = sqlp
                     tn = '/'.join([device.id, comp.id, templ.id, ds.id])
                     aliases = set()
-                    sortkey = (cs, sqlp)
+                    sortkey = (cs,)
                     for dp in ds.getRRDDataPoints():
                         dpname = dp.name()
                         dpnames.append(dpname)

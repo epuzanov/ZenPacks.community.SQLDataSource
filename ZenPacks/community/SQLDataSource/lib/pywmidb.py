@@ -20,10 +20,11 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.4'
+__version__ = '1.4.5'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
+from threading import Lock
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -58,6 +59,7 @@ WbemQualifier._fields_ = [
     ('cimtype', uint32_t),
     ('value', CIMVAR),
     ]
+
 
 WBEM_S_TIMEDOUT = 0x40004L
 
@@ -141,7 +143,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module may be shared, but not connections
-threadsafety = 1
+threadsafety = 3
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -191,19 +193,20 @@ class wmiCursor(object):
         """
         Initialize a Cursor object. connection is a wmiCnx object instance.
         """
-        self.connection = connection
+        self._connection = connection
         self.description = None
         self.rownumber = -1
-        self.arraysize = 5
+        self.arraysize = 1
         self._kbs = {}
-        self._host = connection._host
         self._pEnum = None
-        self._objs = None
-        self._curObj = 0
-        self._count = uint32_t()
+
+    connection = property(lambda self: self._getConnection())
+    def _getConnection(self):
+        warn("DB-API extension cursor.connection used", stacklevel=3)
+        return self._connection
 
     def _check_executed(self):
-        if not getattr(self.connection, '_ctx', None):
+        if not self._connection._ctx:
             raise InterfaceError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
@@ -217,16 +220,8 @@ class wmiCursor(object):
         """
         self._kbs.clear()
         self.description = None
-        if self._pEnum:
-            try: result = library.IUnknown_Release(self._pEnum,
-                            self.connection._ctx)
-            except: pass
+        if self._pEnum: self._connection._release(self)
         self._pEnum = None
-        if self._objs != None:
-            for i in range(self._curObj, self._count.value):
-                talloc_free(self._objs[i])
-        self._curObj = 0
-        self._objs = None
 
     def close(self):
         """
@@ -298,7 +293,7 @@ class wmiCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not getattr(self.connection, '_ctx', None):
+        if not self._connection._ctx:
             raise InterfaceError("Connection closed.")
         self._release()
         self.rownumber = -1
@@ -313,9 +308,10 @@ class wmiCursor(object):
         if args != ():
             operation = operation%args[0]
 
+        self._pEnum = POINTER(IEnumWbemClassObject)()
+        objs = None
+        objs = (POINTER(WbemClassObject) * 1)()
         try:
-            self._pEnum = POINTER(IEnumWbemClassObject)()
-            self._objs = (POINTER(WbemClassObject) * self.arraysize)()
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
                                             ).replace('\\\\"','\\"')).groups('')
             if where:
@@ -330,30 +326,14 @@ class wmiCursor(object):
                 except: self._kbs.clear()
             props = props.upper().replace(' ','').split(',')
             if '*' in props: props.remove('*')
-            result = library.IWbemServices_ExecQuery(
-                            self.connection._pWS,
-                            self.connection._ctx,
-                            "WQL",
-                            operation,
-                            WBEM_FLAG_FORWARD_ONLY | \
-                            WBEM_FLAG_RETURN_IMMEDIATELY | \
-                            WBEM_FLAG_ENSURE_LOCATABLE,
-                            None,
-                            byref(self._pEnum))
-            WERR_CHECK(result, self._host, "ExecQuery")
-            result = library.IEnumWbemClassObject_SmartNext(
-                            self._pEnum,
-                            self.connection._ctx,
-                            -1,
-                            self.arraysize,
-                            self._objs,
-                            byref(self._count))
-            WERR_CHECK(result,self._host,"Retrieve result data.")
-            if self._count.value == 0: return
-            klass = self._objs[0].contents.obj_class.contents
-            inst = self._objs[0].contents.instance.contents
+            ocount = self._connection._execQuery(operation, self, objs)
+            if ocount == 0:
+                self._pEnum = None
+                objs = None
+                return
+            klass = objs[0].contents.obj_class.contents
             cimclass = getattr(klass, '__CLASS', '')
-            cimnamespace = getattr(self._objs[0].contents, '__NAMESPACE',
+            cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
                                                         '').replace('\\', '/')
             dDict = {}
             maxlen = {}
@@ -372,6 +352,8 @@ class wmiCursor(object):
                                 prop.desc.contents.cimtype & CIM_TYPEMASK,
                                 maxlen.get(uName, None),maxlen.get(uName, None),
                                 None, None, None)
+            talloc_free(objs[0])
+            objs = None
             if not props:
                 props = dDict.keys()
                 props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
@@ -380,9 +362,13 @@ class wmiCursor(object):
             if self.description: self.rownumber = 0
 
         except WError, e:
+            self._pEnum = None
+            if ocount.value != 0: talloc_free(objs[0])
             self.close()
             raise OperationalError(e)
         except Exception, e:
+            self._pEnum = None
+            if ocount.value != 0: talloc_free(objs[0])
             self.close()
             raise OperationalError(e)
 
@@ -410,21 +396,25 @@ class wmiCursor(object):
         no more rows are available."""
         return (self.fetchmany(size=1) or (None,))[0]
 
-    def fetchmany(self, size=None):
+    def fetchmany(self, size=0):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if not size: size = self.arraysize
+        if size == 0: size = self.arraysize
+        if size == -1: lastrow = -1
+        else: lastrow = self.rownumber + size
         results = []
         props = [p[0].upper() for p in self.description]
+        objs = None
+        objs = (POINTER(WbemClassObject) * size)()
         try:
-            while self._count.value != 0:
-                for self._curObj in range(self._curObj, self._count.value):
+            while self._pEnum and self.rownumber != lastrow:
+                for i in range(self._connection._smartNext(size, self, objs)):
                     iPath = []
-                    klass = self._objs[self._curObj].contents.obj_class.contents
-                    inst = self._objs[self._curObj].contents.instance.contents
+                    klass = objs[i].contents.obj_class.contents
+                    inst = objs[i].contents.instance.contents
                     pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
-                        '__NAMESPACE':getattr(self._objs[self._curObj].contents,
+                        '__NAMESPACE':getattr(objs[i].contents,
                                             '__NAMESPACE','').replace('\\','/')}
                     for j in range(getattr(klass, '__PROPERTY_COUNT')):
                         prop = klass.properties[j]
@@ -437,35 +427,21 @@ class wmiCursor(object):
                             pdict.clear()
                             break
                         if '__PATH' not in props: continue
-                        for i in range(prop.desc.contents.qualifiers.count):
-                            q = prop.desc.contents.qualifiers.item[i].contents
+                        for k in range(prop.desc.contents.qualifiers.count):
+                            q = prop.desc.contents.qualifiers.item[k].contents
                             if q.name not in ['key']: continue
                             if pType == NUMBER:
                                 iPath.append('%s=%s'%(prop.name, pVal))
                             else:
                                 iPath.append('%s="%s"'%(prop.name, pVal))
-                    talloc_free(self._objs[self._curObj]) 
+                    talloc_free(objs[i]) 
                     if not pdict: continue
                     if '__PATH' in props:
                         pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
-                                                            ','.join(iPath))
+                                                        ','.join(iPath))
                     results.append(tuple([pdict.get(p, None) for p in props]))
                     pdict.clear()
                     self.rownumber += 1
-                    if len(results) == size: break
-                self._curObj += 1
-                if len(results) == size: break
-                self._curObj = 0
-                del self._objs
-                self._objs = (POINTER(WbemClassObject) * self.arraysize)()
-                result = library.IEnumWbemClassObject_SmartNext(
-                            self._pEnum,
-                            self.connection._ctx,
-                            -1,
-                            self.arraysize,
-                            self._objs,
-                            byref(self._count))
-                WERR_CHECK(result,self._host,"Retrieve result data.")
             return results
 
         except WError, e:
@@ -518,32 +494,34 @@ class pysambaCnx:
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wmibatchSize = kwargs.get('wmibatchSize', 5)
-        if not library.lp_loaded():
-            library.lp_load()
-            library.dcerpc_init()
-            library.dcerpc_table_init()
-            library.dcom_proxy_IUnknown_init()
-            library.dcom_proxy_IWbemLevel1Login_init()
-            library.dcom_proxy_IWbemServices_init()
-            library.dcom_proxy_IEnumWbemClassObject_init()
-            library.dcom_proxy_IRemUnknown_init()
-            library.dcom_proxy_IWbemFetchSmartEnum_init()
-            library.dcom_proxy_IWbemWCOSmartEnum_init()
+        creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
+        self._lock = Lock()
+        with self._lock:
+            try:
+                if not library.lp_loaded():
+                    library.lp_load()
+                    library.dcerpc_init()
+                    library.dcerpc_table_init()
+                    library.dcom_proxy_IUnknown_init()
+                    library.dcom_proxy_IWbemLevel1Login_init()
+                    library.dcom_proxy_IWbemServices_init()
+                    library.dcom_proxy_IEnumWbemClassObject_init()
+                    library.dcom_proxy_IRemUnknown_init()
+                    library.dcom_proxy_IWbemFetchSmartEnum_init()
+                    library.dcom_proxy_IWbemWCOSmartEnum_init()
 
-        try:
-            library.com_init_ctx(byref(self._ctx), None)
+                library.com_init_ctx(byref(self._ctx), None)
 
-            creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
-            cred = library.cli_credentials_init(self._ctx)
-            library.cli_credentials_set_conf(cred)
-            library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
-            library.dcom_client_init(self._ctx, cred)
-            library.lp_do_parameter(-1, "client ntlmv2 auth",
+                cred = library.cli_credentials_init(self._ctx)
+                library.cli_credentials_set_conf(cred)
+                library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
+                library.dcom_client_init(self._ctx, cred)
+                library.lp_do_parameter(-1, "client ntlmv2 auth",
                                     kwargs.get('ntlmv2', 'no').lower())
 
-            flags = uint32_t()
-            flags.value = 0
-            result = library.WBEM_ConnectServer(
+                flags = uint32_t()
+                flags.value = 0
+                result = library.WBEM_ConnectServer(
                         self._ctx,                             # com_ctx
                         self._host,                            # server
                         kwargs.get('namespace', 'root/cimv2'), # namespace
@@ -554,15 +532,98 @@ class pysambaCnx:
                         None,                                  # authority 
                         POINTER(IWbemContext)(),               # wbem_ctx 
                         byref(self._pWS))                      # services 
-            WERR_CHECK(result, self._host, "Connect")
+                WERR_CHECK(result, self._host, "Connect")
 
-        except WError, e:
-            self.close()
-            raise InterfaceError(e)
+            except WError, e:
+                self.close()
+                raise InterfaceError(e)
 
-        except Exception, e:
-            self.close()
-            raise InterfaceError(e)
+            except Exception, e:
+                self.close()
+                raise InterfaceError(e)
+
+    def _execQuery(self, operation, cursor, objs):
+        """
+        Executes WQL query
+        """
+        ocount = uint32_t()
+        with self._lock:
+            try:
+                result = library.IWbemServices_ExecQuery(
+                            self._pWS,
+                            self._ctx,
+                            "WQL",
+                            operation,
+                            WBEM_FLAG_RETURN_IMMEDIATELY | \
+                            WBEM_FLAG_ENSURE_LOCATABLE,
+                            None,
+                            byref(cursor._pEnum))
+                WERR_CHECK(result, self._host, "ExecQuery")
+                result = library.IEnumWbemClassObject_SmartNext(
+                            cursor._pEnum,
+                            self._ctx,
+                            -1,
+                            1,
+                            objs,
+                            byref(ocount))
+                WERR_CHECK(result, self._host, "Retrieve result data.")
+                result = library.IEnumWbemClassObject_Reset(cursor._pEnum,
+                                                                    self._ctx)
+                WERR_CHECK(result, self._host, "Reset result of WMI query.")
+                return ocount.value
+
+            except WError, e:
+                cursor._pEnum = None
+                if ocount.value != 0: talloc_free(objs[0])
+                raise InterfaceError(e)
+            except Exception, e:
+                cursor._pEnum = None
+                if ocount.value != 0: talloc_free(objs[0])
+                raise OperationalError(e)
+
+    def _smartNext(self, size, cursor, objs):
+        """
+        Returned next object from Enumarator
+        """
+        ocount = uint32_t()
+        with self._lock:
+            try:
+                result = library.IEnumWbemClassObject_SmartNext(
+                            cursor._pEnum,
+                            self._ctx,
+                            -1,
+                            size,
+                            objs,
+                            byref(ocount))
+                WERR_CHECK(result, self._host, "Retrieve result data.")
+                if ocount.value > 0: return ocount.value
+                objs = None
+                if cursor._pEnum:
+                    try:
+                        result=library.IUnknown_Release(cursor._pEnum,self._ctx)
+                        WERR_CHECK(result, self._host, "Release enumerator.")
+                    except: pass
+                cursor._pEnum = None
+                return 0
+
+            except WError, e:
+                cursor._pEnum = None
+                objs = None
+                raise InterfaceError(e)
+            except Exception, e:
+                cursor._pEnum = None
+                objs = None
+                raise OperationalError(e)
+
+    def _release(self, cursor):
+        """
+        Release Enumerator
+        """
+        with self._lock:
+            try:
+                result = library.IUnknown_Release(cursor._pEnum, self._ctx)
+                WERR_CHECK(result, self._host, "Release enumerator.")
+            except: pass
 
     def __del__(self):
         self.close()

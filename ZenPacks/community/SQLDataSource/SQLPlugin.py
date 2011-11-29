@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.6 2011/11/14 21:50:48 egor Exp $"""
+$Id: SQLPlugin.py,v 2.7 2011/11/29 22:53:10 egor Exp $"""
 
-__version__ = "$Revision: 2.6 $"[11:-2]
+__version__ = "$Revision: 2.7 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
@@ -26,8 +26,25 @@ class SQLPlugin(CollectorPlugin):
     method to turn the returned data structure into a datamap.
     """
     transport = "python"
-
     tables = {}
+    cspropname = 'zConnectionString'
+    deviceProperties = CollectorPlugin.deviceProperties  +  ('zWinUser',
+                                                            'zWinPassword',
+                                                            )
+
+
+    def prepareCS(self, device):
+        args = [getattr(device, self.cspropname,
+                        "'pywbemdb',scheme='https',host='localhost',port=5989")]
+        kwargs = eval('(lambda *argsl,**kwargs:kwargs)(%s)'%args[0].lower())
+        if 'host' not in kwargs:
+            args.append("host='%s'"%getattr(device, 'manageIp', 'localhost')
+        if 'user' not in kwargs:
+            args.append("user='%s'"%getattr(device, 'zWinUser', ''))
+        if 'password' not in kwargs:
+            args.append("password='%s'"%getattr(device, 'zWinPassword', ''))
+        return ','.join(args)
+
 
     def queries(self, device=None):
         return self.tables
