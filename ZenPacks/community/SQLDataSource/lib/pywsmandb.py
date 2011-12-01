@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.1'
+__version__ = '2.1.2'
 
 from xml.sax import handler, make_parser
 try: from uuid import uuid
@@ -243,7 +243,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module and connections may be shared
-threadsafety = 2
+threadsafety = 3
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -554,7 +554,7 @@ class wsmanCursor(object):
             props, classname, where = WQLPAT.match(operation.replace('\\', '\\\\'
                                                     ).replace('\\\\"', '\\"')).groups('')
         except:
-            raise ProgrammingError("Syntax error in the query statement.")
+            raise ProgrammingError("Syntax error in the query: %s"%operation)
         if where:
             try:
                 self._selectors.update(

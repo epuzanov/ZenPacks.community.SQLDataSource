@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.14 2011/11/14 21:40:14 egor Exp $"""
+$Id: SQLClient.py,v 2.15 2011/12/01 20:53:51 egor Exp $"""
 
-__version__ = "$Revision: 2.14 $"[11:-2]
+__version__ = "$Revision: 2.15 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath
@@ -56,11 +56,10 @@ def _filename(device):
 
 class Query(object):
 
-    def __init__(self, sqlp, results):
+    def __init__(self, sqlp):
         self.sql = ''
         self.sqlp = sqlp
         self.resMaps = {}
-        self.results = results
 
 
     def add(self, pname, tname, task):
@@ -74,79 +73,6 @@ class Query(object):
         ikey = tuple([str(k).upper() for k in (kbs or {}).keys()])
         ival = tuple([str(v).strip().upper() for v in (kbs or {}).values()])
         self.resMaps.setdefault(ikey, {}).setdefault(ival, []).append(table)
-
-
-    def parseError(self, err):
-        err = Failure(err)
-        err.value = 'Received error (%s) from query: %s'%(err.value, self.sql)
-        log.error(err.getErrorMessage())
-        for instances in self.resMaps.values():
-            for tables in instances.values():
-                for (pname, table), props in tables:
-                    self.results[pname][table].append(err)
-
-
-    def parseValue(self, value):
-        if isinstance(value, datetime.timedelta):
-            return DateTime(datetime.datetime.now() - value)
-        if isinstance(value, datetime.datetime): return DateTime(value)
-        if isinstance(value, decimal.Decimal): return long(value)
-        if type(value) not in (str, unicode): return value
-#        if value.isdigit(): return long(value)
-#        if value.replace('.', '', 1).isdigit(): return float(value)
-        if value == 'false': return False
-        if value == 'true': return True
-        return value.strip()
-
-
-    def parseResult(self, cursor):
-        if not cursor.description: return
-        rows = {}
-        header = [h[0].upper() for h in cursor.description]
-        somerows = cursor.fetchmany()
-        while somerows:
-            for row in somerows:
-                rDict = dict(zip(header, [self.parseValue(v) for v in row]))
-                for kbKey, kbVal in self.resMaps.iteritems():
-                    cNames=set([k.upper() for k in kbVal.values()[0][0][1].keys()])
-                    if not cNames.intersection(set(header)):
-                        rows[str(row[0]).upper()] = row[-1]
-                        continue
-                    kIdx = []
-                    for kb in kbKey:
-                        kbV = rDict.get(kb, '')
-                        if kbV is list: kbV = ' '.join(kbV)
-                        kIdx.append(str(kbV).upper())
-                    for (pn, table), cols in kbVal.get(tuple(kIdx), []):
-                        result = {}
-                        for name, alias in cols.iteritems():
-                            result[alias] = rDict.get(name.upper(),'')
-                        if result: self.results[pn][table].append(result)
-            somerows = cursor.fetchmany()
-        for kbVal in self.resMaps.values():
-            for tables in kbVal.values():
-                for (pn, table), cols in tables:
-                    if self.results[pn][table]: continue
-                    result = {}
-                    for name, alias in cols.iteritems():
-                        result[alias]=self.parseValue(rows.get(name.upper(),''))
-                    if result: self.results[pn][table].append(result)
-
-
-    def run(self, dbpool):
-        def _execute(txn):
-            for q in re.split('[ \n]go[ \n]|;[ \n]', self.sql, re.I):
-                if not q.strip(): continue
-                txn.execute(q.strip())
-            self.parseResult(txn)
-        log.debug("SQL Query: %s", self.sql)
-        if not hasattr(dbpool, 'runInteraction'):
-            try: _execute(dbpool)
-            except Exception, e: self.parseError(e) 
-            return
-        d = dbpool.runInteraction(_execute)
-        d.addErrback(self.parseError)
-        return d
 
 
 class Pool(object):
@@ -175,46 +101,115 @@ class Pool(object):
         return args, kwargs
 
 
-    def add(self, pname, tname, task, client):
+    def parseValue(self, value):
+        if isinstance(value, datetime.timedelta):
+            return DateTime(datetime.datetime.now() - value)
+        if isinstance(value, datetime.datetime): return DateTime(value)
+        if isinstance(value, decimal.Decimal): return long(value)
+        if type(value) not in (str, unicode): return value
+#        if value.isdigit(): return long(value)
+#        if value.replace('.', '', 1).isdigit(): return float(value)
+        if value == 'false': return False
+        if value == 'true': return True
+        return value.strip()
+
+
+    def parseResult(self, allrows, resMaps, results):
+        if not allrows: return
+        rows = {}
+        header = [h[0].upper() for h in allrows.pop(0)]
+        for row in allrows:
+            rDict = dict(zip(header, [self.parseValue(v) for v in row]))
+            for kbKey, kbVal in resMaps.iteritems():
+                cNames=set([k.upper() for k in kbVal.values()[0][0][1].keys()])
+                if not cNames.intersection(set(header)):
+                    rows[str(row[0]).upper()] = row[-1]
+                    continue
+                kIdx = []
+                for kb in kbKey:
+                    kbV = rDict.get(kb, '')
+                    if kbV is list: kbV = ' '.join(kbV)
+                    kIdx.append(str(kbV).upper())
+                for (pn, table), cols in kbVal.get(tuple(kIdx), []):
+                    result = {}
+                    for name, alias in cols.iteritems():
+                        result[alias] = rDict.get(name.upper(),'')
+                    if result: results[pn][table].append(result)
+        for kbVal in resMaps.values():
+            for tables in kbVal.values():
+                for (pn, table), cols in tables:
+                    if results[pn][table]: continue
+                    result = {}
+                    for name, alias in cols.iteritems():
+                        result[alias]=self.parseValue(rows.get(name.upper(),''))
+                    if result: results[pn][table].append(result)
+
+
+    def add(self, pname, tname, task):
         sqlp = task[0]
         for query in self.queries:
             if query.sqlp != sqlp: continue
             query.add(pname, tname, task)
             return
-        self.queries.append(Query(task[0], client))
+        self.queries.append(Query(task[0]))
         self.queries[-1].add(pname, tname, task)
 
 
-    def run(self):
+    def _execute(self, txn, sql):
+        res = None
+        for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
+            if not q.strip(): continue
+            txn.execute(q.strip())
+        res = txn.fetchall()
+        if res: res.insert(0, txn.description)
+        return res
+
+
+    def run(self, results):
         def inner(driver):
             args, kwargs = self.parseCS(self.cs)
-            kwargs.update({'cp_min':1,'cp_max':1})
-            dbpool = adbapi.ConnectionPool(*args,**kwargs)
-            for query in self.queries:
-                yield query.run(dbpool)
-                driver.next()
-            dbpool.close()
+            kwargs.update({'cp_min':1,'cp_max':3})
+            dbpool = adbapi.ConnectionPool(*args, **kwargs)
+            while self.queries:
+                query = self.queries.pop(0)
+                log.debug("SQL Query: %s", query.sql)
+                try:
+                    yield dbpool.runInteraction(self._execute, query.sql)
+                    self.parseResult(driver.next(), query.resMaps, results)
+                except Exception, e:
+                    log.error(e.message)
+                    e = None
+            if dbpool: dbpool.close()
             dbpool = None
         return drive(inner)
 
 
 class syncPool(Pool):
 
-    def run(self):
-        try:
-            args, kwargs = self.parseCS(self.cs)
-            fl = []
-            if '.' in args[0]: fl.append(args[0].split('.')[-1])
-            dbapi = __import__(args[0], globals(), locals(), fl)
-            connection = dbapi.connect(*args[1:], **kwargs)
-            dbcursor = connection.cursor()
-            for query in self.queries:
-                query.run(dbcursor)
-            dbcursor.close()
+    def run(self, results):
+        connection = None
+        txn = None
+        args, kwargs = self.parseCS(self.cs)
+        fl = []
+        if '.' in args[0]: fl.append(args[0].split('.')[-1])
+        dbapi = __import__(args[0], globals(), locals(), fl)
+        connection = dbapi.connect(*args[1:], **kwargs)
+        txn = connection.cursor()
+        while self.queries:
+            query = self.queries.pop(0)
+            log.debug("SQL Query: %s", query.sql)
+            try:
+                res = self._execute(txn, query.sql)
+                self.parseResult(res, query.resMaps, results)
+            except Exception, e:
+                log.error(e.message)
+                e = None
+        if txn:
+            txn.close()
+        txn = None
+        if connection:
             connection.close()
-        except Exception, e:
-            for query in self.queries:
-                query.parseError(e)
+        connection = None
 
 
 class SQLPlugin(object):
@@ -260,17 +255,17 @@ class SQLClient(BaseClient):
                 poolid += 1
             if poolid > len(queue) - 1:
                 if sync: queue.append(syncPool(task[2]))
-                elif 'pywmidb' in task[2]: queue.append(wmiPool(task[2]))
+#                elif 'pywmidb' in task[2]: continue #queue.append(wmiPool(task[2]))
                 else: queue.append(Pool(task[2])) 
             results.setdefault(pname, {})[tname] = []
-            queue[poolid].add(pname, tname, task, results)
+            queue[poolid].add(pname, tname, task)
         if sync:
             for pool in queue:
-                pool.run()
+                pool.run(results)
             return results.pop(None, results)
         def inner(driver):
             for pool in queue:
-                yield pool.run()
+                yield defer.maybeDeferred(pool.run, results)
                 driver.next()
             yield defer.succeed(results.pop(None, results))
             driver.next()

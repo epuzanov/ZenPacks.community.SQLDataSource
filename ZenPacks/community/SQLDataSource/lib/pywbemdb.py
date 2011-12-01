@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.3'
+__version__ = '2.1.4'
 
 from xml.sax import handler, make_parser
 import httplib, urllib2
@@ -215,7 +215,7 @@ ROWID = DBAPITypeObject()
 apilevel = '2.0'
 
 # module and connections may be shared
-threadsafety = 2
+threadsafety = 3
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -480,7 +480,7 @@ class wbemCursor(object):
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
                                         ).replace('\\\\"', '\\"')).groups('')
         except:
-            raise ProgrammingError("Syntax error in the query statement.")
+            raise ProgrammingError("Syntax error in the query: %s"%operation)
         if where:
             try:
                 self._keybindings.update(

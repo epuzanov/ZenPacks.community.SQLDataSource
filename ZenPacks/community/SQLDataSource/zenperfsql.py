@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.10 2011/11/20 14:20:05 egor Exp $"""
+$Id: zenperfsql.py,v 2.11 2011/12/01 20:55:39 egor Exp $"""
 
-__version__ = "$Revision: 2.10 $"[11:-2]
+__version__ = "$Revision: 2.11 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -172,7 +172,7 @@ class ZenPerfSqlPreferences(object):
         self.cycleInterval = 5 * 60 # seconds
         self.configCycleInterval = 20 # minutes
         self.options = None
-        self.maxTasks = 1
+#        self.maxTasks = 1
 
         # the configurationService attribute is the fully qualified class-name
         # of our configuration service that runs within ZenHub
@@ -365,8 +365,7 @@ class ZenPerfSqlTask(ObservableMixin):
 
 
     def _cleanup(self):
-        if hasattr(self._sqlc, 'close'):
-            self._sqlc.close()
+        if self._sqlc: self._sqlc.close()
         self._sqlc = None
 
 
@@ -377,8 +376,9 @@ class ZenPerfSqlTask(ObservableMixin):
 
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
 
+        self._cleanup()
         self._sqlc = SQLClient()
-        d = self._sqlc.query(self._taskConfig.queries[self._datapoints[0][0]])
+        d = self._sqlc.query(self._taskConfig.queries[self._datapoints[0][0]].copy())
         d.addCallbacks(self._collectSuccessful, self._failure)
 
         # returning a Deferred will keep the framework from assuming the task

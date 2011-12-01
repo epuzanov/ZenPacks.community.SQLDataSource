@@ -362,14 +362,12 @@ class wmiCursor(object):
             if self.description: self.rownumber = 0
 
         except WError, e:
-            self._pEnum = None
             if ocount.value != 0: talloc_free(objs[0])
-            self.close()
+            self._release()
             raise OperationalError(e)
         except Exception, e:
-            self._pEnum = None
             if ocount.value != 0: talloc_free(objs[0])
-            self.close()
+            self._release()
             raise OperationalError(e)
 
 
@@ -400,9 +398,9 @@ class wmiCursor(object):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        if size == 0: size = self.arraysize
-        if size == -1: lastrow = -1
-        else: lastrow = self.rownumber + size
+        lastrow = size
+        if size < 1: size = self.arraysize
+        if lastrow != -1: lastrow += size
         results = []
         props = [p[0].upper() for p in self.description]
         objs = None
@@ -445,10 +443,10 @@ class wmiCursor(object):
             return results
 
         except WError, e:
-            self.close()
+            self._release()
             raise OperationalError(e)
         except Exception, e:
-            self.close()
+            self._release()
             raise OperationalError(e)
 
     def fetchall(self):
