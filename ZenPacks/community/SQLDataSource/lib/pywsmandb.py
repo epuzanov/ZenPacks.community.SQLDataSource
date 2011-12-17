@@ -20,8 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.2'
+__version__ = '2.1.3'
 
+import socket
 from xml.sax import handler, make_parser
 try: from uuid import uuid
 except: import uuid
@@ -554,7 +555,7 @@ class wsmanCursor(object):
             props, classname, where = WQLPAT.match(operation.replace('\\', '\\\\'
                                                     ).replace('\\\\"', '\\"')).groups('')
         except:
-            raise ProgrammingError("Syntax error in the query: %s"%operation)
+            raise ProgrammingError("Syntax error in the query statement.")
         if where:
             try:
                 self._selectors.update(
@@ -738,6 +739,7 @@ class wsmanCnx:
 
         tryLimit = 5
         xml_repl = None
+        if not socket.getdefaulttimeout(): socket.setdefaulttimeout(20)
         while not xml_repl:
             tryLimit -= 1
             try:
@@ -749,6 +751,7 @@ class wsmanCnx:
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
         if self._wsm_vendor == 'Openwsman': xml_repl.readline()
+        socket.setdefaulttimeout(None)
         return xml_repl
 
 

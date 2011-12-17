@@ -20,8 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.4'
+__version__ = '2.1.5'
 
+import socket
 from xml.sax import handler, make_parser
 import httplib, urllib2
 from datetime import datetime, timedelta
@@ -480,7 +481,7 @@ class wbemCursor(object):
             props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
                                         ).replace('\\\\"', '\\"')).groups('')
         except:
-            raise ProgrammingError("Syntax error in the query: %s"%operation)
+            raise ProgrammingError("Syntax error in the query statement.")
         if where:
             try:
                 self._keybindings.update(
@@ -639,6 +640,7 @@ class pywbemCnx:
 
         tryLimit = 5
         xml_repl = None
+        if not socket.getdefaulttimeout(): socket.setdefaulttimeout(20)
         while not xml_repl:
             tryLimit -= 1
             try:
@@ -649,6 +651,7 @@ class pywbemCnx:
             except urllib2.URLError, arg:
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
+        socket.setdefaulttimeout(None)
         return xml_repl
 
 

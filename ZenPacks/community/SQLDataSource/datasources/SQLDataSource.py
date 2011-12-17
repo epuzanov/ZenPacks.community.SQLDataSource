@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.3 2011/10/25 19:18:20 egor Exp $"""
+$Id: SQLDataSource.py,v 2.4 2011/12/14 18:22:43 egor Exp $"""
 
-__version__ = "$Revision: 2.3 $"[11:-2]
+__version__ = "$Revision: 2.4 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -175,6 +175,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             )
             return self.callZenScreen(REQUEST)
         ttpc = getattr(self.rrdTemplate(), 'targetPythonClass', '')
+        cl = SQLClient(device)
         try:
             ccm, ccn = ttpc.rsplit('.', 1)
             compClass = getattr(__import__(ttpc,globals(),locals(),[ccn]),ccn)
@@ -202,16 +203,15 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                         dp.id) for dp in self.getRRDDataPoints()])
             write('Executing query: "%s"'%sql)
             write('')
-            cl = SQLClient()
             rows = cl.query({'t':(sql, {}, cs, properties)},True).get('t', [{}])
-            cl = None
-            if isinstance(rows[0], Failure): raise rows[0]
             write('|'.join(rows[0].keys()))
             for row in rows:
                 write('|'.join(map(str, row.values())))
         except:
             write('exception while executing command')
             write('type: %s  value: %s' % tuple(sys.exc_info()[:2]))
+        cl.close()
+        cl = None
         write('')
         write('')
         write('DONE in %s seconds' % long(time.time() - start))

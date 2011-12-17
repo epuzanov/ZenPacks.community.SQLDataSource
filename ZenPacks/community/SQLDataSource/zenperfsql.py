@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.11 2011/12/01 20:55:39 egor Exp $"""
+$Id: zenperfsql.py,v 2.12 2011/12/17 13:44:38 egor Exp $"""
 
-__version__ = "$Revision: 2.11 $"[11:-2]
+__version__ = "$Revision: 2.12 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -41,7 +41,7 @@ from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         TaskStates
 from Products.ZenEvents.ZenEventClasses import Error, Clear
 from Products.ZenUtils.observable import ObservableMixin
-from SQLClient import SQLClient
+from SQLClient import SQLClient, SQLPlugin
 
 # We retrieve our configuration data remotely via a Twisted PerspectiveBroker
 # connection. To do so, we need to import the class that will be used by the
@@ -172,7 +172,7 @@ class ZenPerfSqlPreferences(object):
         self.cycleInterval = 5 * 60 # seconds
         self.configCycleInterval = 20 # minutes
         self.options = None
-#        self.maxTasks = 1
+        self.maxTasks = 1
 
         # the configurationService attribute is the fully qualified class-name
         # of our configuration service that runs within ZenHub
@@ -250,7 +250,7 @@ class ZenPerfSqlTask(ObservableMixin):
         err = result.getErrorMessage()
         log.error("Device %s: %s", self._devId, err)
         collectorName = self._preferences.collectorName
-        summary = "Could not fetch data from source"
+        summary = "Could not fetch data"
 
         self._eventService.sendEvent(dict(
             summary=summary,
@@ -314,13 +314,14 @@ class ZenPerfSqlTask(ObservableMixin):
 
 
         compstatus = {}
-        for cs,tn,dpname,alias,comp,expr,rrdPath,rrdType,rrdC,mm in self._datapoints:
+        for cs,tn,dpname,alias,comp,expr,rrdP,rrdT,rrdC,mm in self._datapoints:
             values = []
             compstatus[comp] = Clear
-            for d in results.get(tn, []):
-                if isinstance(d, Failure):
-                    compstatus[comp] = d
-                    break
+            tresults = results.get(tn, [])
+            if isinstance(tresults, Failure):
+                compstatus[comp] = tresults
+                tresults = []
+            for d in tresults:
                 if len(d) == 0: continue
                 dpvalue = d.get(alias, None)
                 if dpvalue == None or dpvalue == '': continue
@@ -346,9 +347,9 @@ class ZenPerfSqlTask(ObservableMixin):
             elif dpname.endswith('_first'): value = values[0]
             elif dpname.endswith('_last'): value = values[-1]
             else: value = sum(values) / len(values)
-            try: self._dataService.writeRRD(rrdPath,
+            try: self._dataService.writeRRD(rrdP,
                                             float(value),
-                                            rrdType,
+                                            rrdT,
                                             rrdC,
                                             min=mm[0],
                                             max=mm[1])
@@ -376,10 +377,11 @@ class ZenPerfSqlTask(ObservableMixin):
 
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
 
-        self._cleanup()
-        self._sqlc = SQLClient()
-        d = self._sqlc.query(self._taskConfig.queries[self._datapoints[0][0]].copy())
-        d.addCallbacks(self._collectSuccessful, self._failure)
+        queries = self._taskConfig.queries[self._datapoints[0][0]].copy()
+        self._sqlc = SQLClient(self._taskConfig)
+        d = self._sqlc.query(queries)
+        d.addCallback(self._collectSuccessful)
+        d.addErrback(self._failure)
 
         # returning a Deferred will keep the framework from assuming the task
         # is done until the Deferred actually completes

@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.8 2011/11/29 23:18:36 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.9 2011/12/17 13:48:05 egor Exp $"""
 
-__version__ = "$Revision: 2.8 $"[11:-2]
+__version__ = "$Revision: 2.9 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -59,7 +59,7 @@ class SqlPerfConfig(CollectorConfigService):
                         dpname = dp.name()
                         dpnames.append(dpname)
                         alias = (dp.aliases() or [dp])[0]
-                        aname = alias.id.strip().upper()
+                        aname = alias.id.strip().lower()
                         formula = getattr(alias, 'formula', None)
                         expr = formula and talesEval("string:%s"%alias.formula,
                                             comp, extra={'now':'now'}) or None

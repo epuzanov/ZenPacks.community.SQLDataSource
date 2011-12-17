@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.5'
+__version__ = '1.4.6'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -228,7 +228,6 @@ class wmiCursor(object):
         Closes the cursor. The cursor is unusable from this point.
         """
         self._release()
-        self._count = None
 
     def _convertArray(self, arr):
         """
@@ -308,6 +307,7 @@ class wmiCursor(object):
         if args != ():
             operation = operation%args[0]
 
+        ocount = 0
         self._pEnum = POINTER(IEnumWbemClassObject)()
         objs = None
         objs = (POINTER(WbemClassObject) * 1)()
@@ -362,11 +362,13 @@ class wmiCursor(object):
             if self.description: self.rownumber = 0
 
         except WError, e:
-            if ocount.value != 0: talloc_free(objs[0])
+            self._pEnum = None
+            if ocount != 0: talloc_free(objs[0])
             self._release()
             raise OperationalError(e)
         except Exception, e:
-            if ocount.value != 0: talloc_free(objs[0])
+            self._pEnum = None
+            if ocount != 0: talloc_free(objs[0])
             self._release()
             raise OperationalError(e)
 
@@ -400,7 +402,7 @@ class wmiCursor(object):
         self._check_executed()
         lastrow = size
         if size < 1: size = self.arraysize
-        if lastrow != -1: lastrow += size
+        if lastrow > -1: lastrow = self.rownumber + size
         results = []
         props = [p[0].upper() for p in self.description]
         objs = None
@@ -494,7 +496,8 @@ class pysambaCnx:
         self._wmibatchSize = kwargs.get('wmibatchSize', 5)
         creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
         self._lock = Lock()
-        with self._lock:
+        try:
+            self._lock.acquire()
             try:
                 if not library.lp_loaded():
                     library.lp_load()
@@ -539,13 +542,15 @@ class pysambaCnx:
             except Exception, e:
                 self.close()
                 raise InterfaceError(e)
+        finally: self._lock.release()
 
     def _execQuery(self, operation, cursor, objs):
         """
         Executes WQL query
         """
         ocount = uint32_t()
-        with self._lock:
+        try:
+            self._lock.acquire()
             try:
                 result = library.IWbemServices_ExecQuery(
                             self._pWS,
@@ -578,13 +583,15 @@ class pysambaCnx:
                 cursor._pEnum = None
                 if ocount.value != 0: talloc_free(objs[0])
                 raise OperationalError(e)
+        finally: self._lock.release()
 
     def _smartNext(self, size, cursor, objs):
         """
         Returned next object from Enumarator
         """
         ocount = uint32_t()
-        with self._lock:
+        try:
+            self._lock.acquire()
             try:
                 result = library.IEnumWbemClassObject_SmartNext(
                             cursor._pEnum,
@@ -612,16 +619,19 @@ class pysambaCnx:
                 cursor._pEnum = None
                 objs = None
                 raise OperationalError(e)
+        finally: self._lock.release()
 
     def _release(self, cursor):
         """
         Release Enumerator
         """
-        with self._lock:
+        try:
+            self._lock.acquire()
             try:
                 result = library.IUnknown_Release(cursor._pEnum, self._ctx)
                 WERR_CHECK(result, self._host, "Release enumerator.")
             except: pass
+        finally: self._lock.release()
 
     def __del__(self):
         self.close()

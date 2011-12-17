@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.8 2011/12/01 20:53:30 egor Exp $"""
+$Id: SQLPlugin.py,v 2.9 2011/12/17 13:45:07 egor Exp $"""
 
-__version__ = "$Revision: 2.8 $"[11:-2]
+__version__ = "$Revision: 2.9 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
@@ -55,18 +55,17 @@ class SQLPlugin(CollectorPlugin):
 
 
     def collect(self, device, log):
-        try:
-            cl = SQLClient(device)
-            results = cl.query(self.prepareQueries(device), True)
-            cl.close()
-            cl = None
-            return results
-        except Exception, ex:
-            log.error("Error: %s", ex)
+        results = {}
+        cl = SQLClient(device)
+        try: results.update(cl.query(self.prepareQueries(device), True))
+        except Exception, ex: pass #log.error("Error: %s", ex)
+        cl.close()
+        cl = None
+        return results
+
 
     def preprocess(self, results, log):
         for table in results.keys():
-            if results[table] and isinstance(results[table][0], Failure):
-                results[table] = []
+            if isinstance(results[table], Failure): results[table] = []
         return results
 
