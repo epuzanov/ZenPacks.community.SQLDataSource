@@ -12,12 +12,13 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.9 2011/12/17 13:45:07 egor Exp $"""
+$Id: SQLPlugin.py,v 2.10 2011/12/18 21:11:52 egor Exp $"""
 
-__version__ = "$Revision: 2.9 $"[11:-2]
+__version__ = "$Revision: 2.10 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
+from string import lower
 from SQLClient import SQLClient
 
 class SQLPlugin(CollectorPlugin):
@@ -34,14 +35,14 @@ class SQLPlugin(CollectorPlugin):
 
 
     def prepareCS(self, device):
-        args = [getattr(device, self.cspropname,
-                        "'pywbemdb',scheme='https',host='localhost',port=5989")]
-        kwargs = eval('(lambda *argsl,**kwargs:kwargs)(%s)'%args[0].lower())
-        if 'host' not in kwargs:
+        args = [getattr(device, self.cspropname, '') or \
+                        "'pywbemdb',scheme='https',host='localhost',port=5989"]
+        kwkeys = map(lower, eval('(lambda *arg,**kws:kws)(%s)'%args[0]).keys())
+        if 'host' not in kwkeys:
             args.append("host='%s'"%getattr(device, 'manageIp', 'localhost'))
-        if 'user' not in kwargs:
+        if 'user' not in kwkeys:
             args.append("user='%s'"%getattr(device, 'zWinUser', ''))
-        if 'password' not in kwargs:
+        if 'password' not in kwkeys:
             args.append("password='%s'"%getattr(device, 'zWinPassword', ''))
         return ','.join(args)
 
