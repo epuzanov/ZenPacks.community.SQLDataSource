@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.5'
+__version__ = '2.1.4'
 
 import socket
 from xml.sax import handler, make_parser
@@ -689,7 +689,7 @@ class wsmanCnx:
     This class represent an WS-Management Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._timeout = int(kwargs.get('timeout', 30))
+        self._timeout = 30
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'http')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))
@@ -842,7 +842,6 @@ def Connect(*args, **kwargs):
     password      user's password
     host          host name
     namespace     namespace
-    timeout       query timeout
     dialect       query dialect
     key_file      key file for Certificate based Authorization
     cert_file     cert file for Certificate based Authorization
