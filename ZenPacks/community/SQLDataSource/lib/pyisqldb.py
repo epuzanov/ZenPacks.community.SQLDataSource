@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.5'
+__version__ = '1.0.6'
 
 from string import upper, strip
 import datetime
@@ -199,9 +199,10 @@ class isqlCursor(object):
         tCount = 0
         cMap = []
         try:
-            p = subprocess.Popen(self._args,stdin=subprocess.PIPE,
-                                            stderr=subprocess.PIPE,
-                                            stdout=subprocess.PIPE)
+            p = subprocess.Popen(self._args, bufsize=-1,
+                                stdin=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                stdout=subprocess.PIPE)
             queries = [q.strip().replace('\n',' ') for q in self._queue]
             del self._queue[:]
             lines, err = p.communicate('%s\n'%'\n'.join(queries))

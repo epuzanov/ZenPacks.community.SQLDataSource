@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.3'
+__version__ = '2.1.4'
 
 import socket
 from xml.sax import handler, make_parser
@@ -689,6 +689,7 @@ class wsmanCnx:
     This class represent an WS-Management Connection connection.
     """
     def __init__(self, *args, **kwargs):
+        self._timeout = 30
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'http')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))
@@ -739,10 +740,11 @@ class wsmanCnx:
 
         tryLimit = 5
         xml_repl = None
-        if not socket.getdefaulttimeout(): socket.setdefaulttimeout(20)
         while not xml_repl:
             tryLimit -= 1
             try:
+                if not socket.getdefaulttimeout():
+                    socket.setdefaulttimeout(self._timeout)
                 xml_repl = self._urlOpener.open(request)
             except urllib2.HTTPError, arg:
                 if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
@@ -751,7 +753,6 @@ class wsmanCnx:
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
         if self._wsm_vendor == 'Openwsman': xml_repl.readline()
-        socket.setdefaulttimeout(None)
         return xml_repl
 
 
@@ -800,7 +801,7 @@ class wsmanCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        return
+        socket.setdefaulttimeout(None)
 
     def commit(self):
         """

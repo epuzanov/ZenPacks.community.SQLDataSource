@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.12 2011/12/17 13:44:38 egor Exp $"""
+$Id: zenperfsql.py,v 2.13 2011/12/19 20:44:38 egor Exp $"""
 
-__version__ = "$Revision: 2.12 $"[11:-2]
+__version__ = "$Revision: 2.13 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -290,7 +290,7 @@ class ZenPerfSqlTask(ObservableMixin):
                 errors.append(event)
             else:
                 events.append(event)
-        if len(errors) == len(components) > 0:
+        if len(errors) > 3:
             event = errors[0]
             del event['component']
             events.append(event)
@@ -299,8 +299,6 @@ class ZenPerfSqlTask(ObservableMixin):
         for event in events:
             self._eventService.sendEvent(event)
 
-    def clientFinished(self, client):
-        pass
 
     def _collectSuccessful(self, results={}):
         """

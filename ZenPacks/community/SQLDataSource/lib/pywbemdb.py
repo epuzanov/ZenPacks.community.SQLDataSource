@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.5'
+__version__ = '2.1.6'
 
 import socket
 from xml.sax import handler, make_parser
@@ -601,6 +601,7 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
+        self._timeout = 30
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
@@ -640,10 +641,11 @@ class pywbemCnx:
 
         tryLimit = 5
         xml_repl = None
-        if not socket.getdefaulttimeout(): socket.setdefaulttimeout(20)
         while not xml_repl:
             tryLimit -= 1
             try:
+                if not socket.getdefaulttimeout():
+                    socket.setdefaulttimeout(self._timeout)
                 xml_repl = self._urlOpener.open(request)
             except urllib2.HTTPError, arg:
                 if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
@@ -651,7 +653,6 @@ class pywbemCnx:
             except urllib2.URLError, arg:
                 if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
                 else: raise InterfaceError('socket error: %s' % arg.reason)
-        socket.setdefaulttimeout(None)
         return xml_repl
 
 
@@ -662,7 +663,7 @@ class pywbemCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        return
+        socket.setdefaulttimeout(None)
 
     def commit(self):
         """
