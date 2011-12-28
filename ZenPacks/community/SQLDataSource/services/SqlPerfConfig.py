@@ -12,9 +12,9 @@ __doc__="""SqlPerfConfig
 
 Provides config to zenperfsql clients.
 
-$Id: SqlPerfConfig.py,v 2.9 2011/12/17 13:48:05 egor Exp $"""
+$Id: SqlPerfConfig.py,v 2.10 2011/12/26 20:58:48 egor Exp $"""
 
-__version__ = "$Revision: 2.9 $"[11:-2]
+__version__ = "$Revision: 2.10 $"[11:-2]
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
@@ -42,7 +42,16 @@ class SqlPerfConfig(CollectorConfigService):
         log.debug('device: %s', device)
         try: perfServer = device.getPerformanceServer()
         except: return None
+        evtOrgNames = self.dmd.Events.Status.getOrganizerNames()
         for comp in [device] + device.getMonitoredComponents():
+            compName = ""
+            compType = ""
+            if not isinstance(comp, Device):
+                compName = comp.id
+                if comp.__class__.__name__ in evtOrgNames:
+                    compType = comp.__class__.__name__
+                elif comp.meta_type in evtOrgNames:
+                    compType = comp.meta_type
             try: basepath = comp.rrdPath()
             except: continue
             for templ in comp.getRRDTemplates():
@@ -65,7 +74,7 @@ class SqlPerfConfig(CollectorConfigService):
                                             comp, extra={'now':'now'}) or None
                         aliases.add(aname)
                         proxy.datapoints.append((sortkey, tn, dp.id, aname,
-                                isinstance(comp, Device) and "" or comp.id,
+                                (compName, compType),
                                 expr,
                                 "/".join((basepath, dpname)),
                                 dp.rrdtype,

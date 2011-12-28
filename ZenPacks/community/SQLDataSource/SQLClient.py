@@ -12,23 +12,20 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.16 2011/12/17 13:43:44 egor Exp $"""
+$Id: SQLClient.py,v 2.17 2011/12/28 20:07:25 egor Exp $"""
 
-__version__ = "$Revision: 2.16 $"[11:-2]
+__version__ = "$Revision: 2.17 $"[11:-2]
 
 import Globals
-if __name__ == "__main__":
-    import pysamba.twisted.reactor
-    from twisted.internet import reactor
 from Products.ZenUtils.Utils import zenPath, unused
 from Products.ZenUtils.Driver import drive
 from Products.DataCollector.BaseClient import BaseClient
 
-from pysamba.wbem.Query import Query
-from pysamba.twisted.callback import WMIFailure
 from twisted.enterprise import adbapi
 from twisted.internet import defer
 from twisted.python.failure import Failure
+from pysamba.wbem.Query import Query
+unused(Query)
 
 import datetime
 import decimal
@@ -84,9 +81,12 @@ class dbQuery(object):
         ival = tuple([str(v).strip().lower() for v in (kbs or {}).values()])
         self.resMaps.setdefault(ikey, {}).setdefault(ival, []).append(table)
 
-
     def parseError(self, err):
-        err = getattr(err, 'value', err)
+        if isinstance(err, Failure):
+            err.cleanFailure()
+            err = err.getErrorMessage()
+        else:
+            err = getattr(err, 'value', err)
         log.error('Error received from %s, error: %s, query: %s'%(
                                                     self.host, err, self.sql))
         for instances in self.resMaps.values():
@@ -94,7 +94,6 @@ class dbQuery(object):
                 for (pname, table), props in tables:
                     self.results[pname][table] = Failure(err)
         return 1
-
 
     def parseValue(self, value):
         if isinstance(value, datetime.timedelta):
@@ -106,9 +105,7 @@ class dbQuery(object):
         if value == 'true': return True
         return value.strip()
 
-
     def parseResult(self, results):
-        if isinstance(results, Exception): return self.parseError(results)
         if not results: return 0
         rows = {}
         header = [h[0].lower() for h in results.pop(0)]
@@ -139,27 +136,134 @@ class dbQuery(object):
                     if result: self.results[pn][table].append(result)
         return 0
 
-
-    def execute(self, txn):
-        log.debug("SQL Query: %s", self.sql)
+    def execute(self, txn, sql):
+        log.debug("Query: %s", sql)
         res = []
-        try:
-            for q in re.split('[ \n]go[ \n]|;[ \n]', self.sql, re.I):
-                if not q.strip(): continue
-                txn.execute(q.strip())
-            res.extend(txn.fetchall())
-            if res: res.insert(0, txn.description)
-        except Exception, ex: res = ex
+        for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
+            if not q.strip(): continue
+            txn.execute(q.strip())
+        res.extend(txn.fetchall())
+        if res: res.insert(0, txn.description)
         return res
 
-
     def run(self, dbpool):
-        if not hasattr(dbpool, 'runInteraction'):
-            return self.parseResult(self.execute(dbpool))
-        d = dbpool.runInteraction(self.execute)
+        d = dbpool.runInteraction(self.execute, self.sql)
         d.addCallback(self.parseResult)
         d.addErrback(self.parseError)
         return d
+
+
+class dbPool(object):
+
+    def __init__(self, cs):
+        self.cs = cs
+        self.queries = []
+        self.pool = None
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        if self.pool:
+            self.pool.close()
+        self.pool = None
+
+    def parseCS(self, cs=None):
+        try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
+        except:
+            args = []
+            kwargs = {}
+            for arg in cs.split(','):
+                try:
+                    if arg.strip().startswith("'"):
+                        arg = arg.strip("' ")
+                        raise
+                    var, val = arg.strip().split('=', 1)
+                    if val.startswith('\'') or val.startswith('"'):
+                        kwargs[var.strip()] = val.strip('\'" ')
+                    else:
+                        kwargs[var.strip()] = int(val.strip())
+                except: args.append(arg)
+        return args, kwargs
+
+    def add(self, pname, tname, task, results, host):
+        sqlp = task[0]
+        for query in self.queries:
+            if query.sqlp != sqlp: continue
+            query.add(pname, tname, task)
+            return
+        self.queries.append(dbQuery(task[0], results, host))
+        self.queries[-1].add(pname, tname, task)
+
+    def connect(self):
+        def inner(driver):
+            args, kwargs = self.parseCS(self.cs)
+            kwargs.update({'cp_min':1,'cp_max':1})
+            yield defer.succeed(adbapi.ConnectionPool(*args, **kwargs))
+            self.pool = driver.next()
+        return drive(inner)
+
+    def run(self):
+        def inner(driver):
+            errcount = 0
+            try:
+                yield self.connect()
+                driver.next()
+            except Exception, e:
+                for query in self.queries:
+                    query.parseError(e)
+                self.close()
+                e.raiseException()
+            for query in self.queries:
+                yield query.run(self.pool)
+                errcount += driver.next()
+            self.close()
+            yield defer.succeed(errcount == len(self.queries) and 1 or 0)
+            driver.next()
+        return drive(inner)
+
+
+class syncPool(dbPool):
+
+    def __init__(self, cs):
+        self.cs = cs
+        self.queries = []
+        self.pool = None
+        self.connection = None
+
+    def close(self):
+        if self.pool:
+            self.pool.close()
+        self.pool = None
+        if self.connection:
+            self.connection.close()
+        self.connection = None
+
+    def connect(self):
+        args, kwargs = self.parseCS(self.cs)
+        fl = []
+        if '.' in args[0]: fl.append(args[0].split('.')[-1])
+        dbapi = __import__(args[0], globals(), locals(), fl)
+        self.connection = dbapi.connect(*args[1:], **kwargs)
+        self.pool = self.connection.cursor()
+
+    def run(self):
+        errcount = 0
+        try:
+            self.connect()
+        except Exception, e:
+            for query in self.queries:
+                query.parseError(e)
+            self.close()
+            raise e
+        for query in self.queries:
+            try:
+                res = query.execute(self.pool, query.sql)
+                errcount += query.parseResult(res)
+            except Exception, e:
+                errcount += query.parseError(e)
+        self.close()
+        return errcount == len(self.queries) and 1 or 0
 
 
 class wmiQuery(dbQuery):
@@ -198,9 +302,9 @@ class wmiQuery(dbQuery):
                     if result: self.results[pn][table].append(result)
         return 0
 
-
     def run(self, pool):
         def inner(driver):
+            from pysamba.twisted.callback import WMIFailure
             results = []
             query = self.sql
             log.debug("WMI Query: %s", query)
@@ -234,69 +338,6 @@ class wmiQuery(dbQuery):
         return d
 
 
-class dbPool(object):
-
-    def __init__(self, cs):
-        self.cs = cs
-        self.queries = []
-
-
-    def parseCS(self, cs=None):
-        try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
-        except:
-            args = []
-            kwargs = {}
-            for arg in cs.split(','):
-                try:
-                    if arg.strip().startswith("'"):
-                        arg = arg.strip("' ")
-                        raise
-                    var, val = arg.strip().split('=', 1)
-                    if val.startswith('\'') or val.startswith('"'):
-                        kwargs[var.strip()] = val.strip('\'" ')
-                    else:
-                        kwargs[var.strip()] = int(val.strip())
-                except: args.append(arg)
-        return args, kwargs
-
-
-    def add(self, pname, tname, task, results, host):
-        sqlp = task[0]
-        for query in self.queries:
-            if query.sqlp != sqlp: continue
-            query.add(pname, tname, task)
-            return
-        self.queries.append(dbQuery(task[0], results, host))
-        self.queries[-1].add(pname, tname, task)
-
-
-    def connect(self):
-        args, kwargs = self.parseCS(self.cs)
-        kwargs.update({'cp_min':1,'cp_max':1})
-        return defer.maybeDeferred(adbapi.ConnectionPool, *args, **kwargs)
-
-
-    def run(self):
-        def inner(driver):
-            errcount = 0
-            dbpool = None
-            try:
-                yield self.connect()
-                dbpool = driver.next()
-                for query in self.queries:
-                    yield query.run(dbpool)
-                    errcount += driver.next()
-            except Exception, ex:
-                for query in self.queries:
-                    query.parseError(ex)
-                errcount = len(self.queries)
-            if dbpool: dbpool.close()
-            dbpool = None
-            yield defer.succeed(errcount == len(self.queries) and 1 or 0)
-            driver.next()
-        return drive(inner)
-
-
 class wmiPool(dbPool):
 
     def add(self, pname, tname, task, results, host):
@@ -307,7 +348,6 @@ class wmiPool(dbPool):
             return
         self.queries.append(wmiQuery(task[0], results, host))
         self.queries[-1].add(pname, tname, task)
-
 
     def connect(self):
         from pysamba.twisted.reactor import eventContext
@@ -323,34 +363,8 @@ class wmiPool(dbPool):
         creds = '%s%%%s'%(user, password)
         namespace = kwargs.get('namespace', 'root/cimv2')
         log.debug("connect to %s, user %s", host, user)
-        dbpool = Query()
-        d = dbpool.connect(eventContext, host, host, creds, namespace)
-        d.addBoth(lambda x: dbpool)
-        return d
-
-
-class syncPool(dbPool):
-
-    def run(self):
-        dbcursor = None
-        connection = None
-        errcount = 0
-        try:
-            args, kwargs = self.parseCS(self.cs)
-            fl = []
-            if '.' in args[0]: fl.append(args[0].split('.')[-1])
-            dbapi = __import__(args[0], globals(), locals(), fl)
-            connection = dbapi.connect(*args[1:], **kwargs)
-            dbcursor = connection.cursor()
-            for query in self.queries:
-                errcount += query.run(dbcursor)
-        except Exception, e:
-            for query in self.queries:
-                query.parseError(e)
-            errcount = len(self.queries)
-        if dbcursor: dbcursor.close()
-        if connection: connection.close()
-        return errcount == len(self.queries) and 1 or 0
+        self.pool = Query()
+        return self.pool.connect(eventContext, host, host, creds, namespace)
 
 
 class SQLPlugin(object):
@@ -386,17 +400,14 @@ class SQLClient(BaseClient):
         self.plugins = plugins
         self.results = []
 
-
     def __del__(self):
         self.close()
-
 
     def close(self):
         del self.plugins[:]
         del self.results[:]
 
-
-    def query(self, tasks={}, sync=False):
+    def query(self, tasks={}, async=False):
         queue = []
         results = {}
         for tname, task in tasks.iteritems():
@@ -407,31 +418,34 @@ class SQLClient(BaseClient):
                 if pool.cs == task[2]: break
                 poolid += 1
             if poolid > len(queue) - 1:
-                if sync: queue.append(syncPool(task[2]))
+                if not async: queue.append(syncPool(task[2]))
                 elif task[2].startswith("'pywmidb'"):
                     queue.append(syncPool(task[2]))
                 else: queue.append(dbPool(task[2])) 
             results.setdefault(pname, {})[tname] = []
             queue[poolid].add(pname, tname, task, results, self.host)
-        if sync:
+        if not async:
             errcount = 0
             qlen = len(queue)
             for pool in queue:
-                errcount += pool.run()
-            if errcount == qlen: results.values()[0].values()[0].raiseException()
+                try: errcount += pool.run()
+                except Exception, e: errcount += 1
+            if errcount == qlen:
+                results.values()[0].values()[0].raiseException()
             return results.pop(None, results)
         def inner(driver):
             errcount = 0
             qlen = len(queue)
             for pool in queue:
-                yield defer.maybeDeferred(pool.run)
-                errcount += driver.next()
+                try:
+                    yield defer.maybeDeferred(pool.run)
+                    errcount += driver.next()
+                except Exception, e: errcount += 1
             if errcount == qlen:
                 results[None] = results.values()[0].values()[0]
             yield defer.succeed(results.pop(None, results))
             driver.next()
         return drive(inner)
-
 
     def run(self):
         def inner(driver):
@@ -440,7 +454,7 @@ class SQLClient(BaseClient):
                 pn = plugin.name()
                 for tn,t in (plugin.prepareQueries(self.device) or {}).iteritems():
                     tasks[(pn,tn)] = t
-            yield self.query(tasks)
+            yield defer.maybeDeferred(self.query, tasks, async=True)
             driver.next()
         d = drive(inner)
         def finish(results):
@@ -453,16 +467,15 @@ class SQLClient(BaseClient):
             if self.datacollector:
                 self.datacollector.clientFinished(self)
             else:
+                from twisted.internet import reactor
                 reactor.stop()
         d.addBoth(finish)
         return d
-
 
     def getResults(self):
         """Return data for this client
         """
         return self.results
-
 
 
 def sqlCollect(collector, device, ip, timeout):
@@ -498,16 +511,6 @@ def sqlCollect(collector, device, ip, timeout):
     collector.addClient(client, timeout, 'SQL', device.id)
 
 
-def SQLGet(cs, query, columns):
-    sp = SQLPlugin({'t': (query, {}, cs, columns)})
-    cl = SQLClient(device=None, plugins=[sp,])
-    cl.run()
-    reactor.run()
-    for plugin, result in cl.getResults():
-        if plugin == sp: return result
-    return Failure('ERROR:zen.SQLClient:No data received.')
-
-
 if __name__ == "__main__":
     cs = "'MySQLdb',host='127.0.0.1',port=3306,db='information_schema',user='zenoss',passwd='zenoss'"
     query = "USE information_schema; SHOW GLOBAL STATUS;"
@@ -533,11 +536,23 @@ if __name__ == "__main__":
         elif opt in ("-a", "--aliases"):
             aliases = arg.split()
     columns = dict(zip(columns, aliases))
-    if 1: results = SQLGet(cs, query, columns)
+    cl = SQLClient(device=None)
+    if 0:
+        sp = SQLPlugin({'t': (query, {}, cs, columns)})
+        cl.plugins.append(sp)
+        cl.run()
+        from twisted.internet import reactor
+        reactor.run()
+        results = Failure('ERROR:zen.SQLClient:No data received.')
+        for plugin, result in cl.getResults():
+            if plugin != sp: continue
+            results = result
+            break
+        sp = None
     else:
-        cl = SQLClient()
-        try: results = cl.query({'t':(query, {}, cs, columns)}, True)
+        try: results = cl.query({'t':(query, {}, cs, columns)}, async=False)
         except Exception, e: results = Failure(e)
+    cl.close()
     if isinstance(results, Failure):
         print results.getErrorMessage()
         sys.exit(1)

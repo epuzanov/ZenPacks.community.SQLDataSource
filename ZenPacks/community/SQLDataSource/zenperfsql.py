@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.13 2011/12/19 20:44:38 egor Exp $"""
+$Id: zenperfsql.py,v 2.14 2011/12/26 21:01:27 egor Exp $"""
 
-__version__ = "$Revision: 2.13 $"[11:-2]
+__version__ = "$Revision: 2.14 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -182,20 +182,14 @@ class ZenPerfSqlPreferences(object):
         parser.add_option('--debug', dest='debug', default=False,
                                action='store_true',
                                help='Increase logging verbosity.')
-        parser.add_option('--ntlmv2auth',
-                               dest='ntlmv2auth',
-                               default=False,
+        parser.add_option('--async', dest='async', default=False,
                                action="store_true",
-                               help="Enable NTLMv2 Authentication for Windows Devices")
+                               help="Execute Queries Asynchronously.")
 
 
     def postStartup(self):
         # turn on debug logging if requested
         logseverity = self.options.logseverity
-
-        if getattr(self.options, 'ntlmv2auth', False): flag = True
-        else: flag = False
-        pysamba.twisted.reactor.setNTLMv2Authentication(flag)
 
 
 class ZenPerfSqlTask(ObservableMixin):
@@ -241,7 +235,6 @@ class ZenPerfSqlTask(ObservableMixin):
                                                         "zenperfsql")
         self._sqlc = None
 
-
     def _failure(self, result, comp=None):
         """
         Errback for an unsuccessful asynchronous connection or collection 
@@ -266,39 +259,39 @@ class ZenPerfSqlTask(ObservableMixin):
         # give the result to the rest of the errback chain
         return result
 
-
     def _sendEvents(self, components):
         """
         Sent Error and Clear events 
         """
-        message = "Could not fetch data"
         events = []
         errors = []
-        for comp, severity in components.iteritems():
+        for (comp, metaType), severity in components.iteritems():
             event = dict(
                 summary = "Could not fetch data",
-                message = message,
-                eventClass = '/Status/PyDBAPI',
+                message = "Could not fetch data",
+                eventClass = '/Status/%s' % metaType,
                 device = self._devId,
-                component = comp,
                 severity = severity,
                 agent = self._preferences.collectorName,
                 )
+            if comp: event['component'] = comp
+            else: event['eventClass'] = '/Status/PyDBAPI'
             if isinstance(severity, Failure):
                 event['message'] = severity.getErrorMessage()
                 event['severity'] = Error
                 errors.append(event)
             else:
                 events.append(event)
-        if len(errors) > 3:
+        if len(errors) == len(components) > 0:
             event = errors[0]
             del event['component']
+            event['eventClass'] = '/Status/PyDBAPI'
             events.append(event)
         else:
             events.extend(errors)
         for event in events:
+            if event['eventClass'] == '/Status/': continue
             self._eventService.sendEvent(event)
-
 
     def _collectSuccessful(self, results={}):
         """
@@ -309,7 +302,6 @@ class ZenPerfSqlTask(ObservableMixin):
         log.debug("Successful collection from %s [%s], results=%s",
                   self._devId, self._manageIp, results)
         if not results: return None
-
 
         compstatus = {}
         for cs,tn,dpname,alias,comp,expr,rrdP,rrdT,rrdC,mm in self._datapoints:
@@ -358,29 +350,22 @@ class ZenPerfSqlTask(ObservableMixin):
         self._cleanup()
         return results
 
-
     def cleanup(self):
         self._cleanup()
-
 
     def _cleanup(self):
         if self._sqlc: self._sqlc.close()
         self._sqlc = None
 
-
     def doTask(self):
-
         log.debug("Polling for SQL data from %s [%s]", 
                                                     self._devId, self._manageIp)
-
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
-
         queries = self._taskConfig.queries[self._datapoints[0][0]].copy()
         self._sqlc = SQLClient(self._taskConfig)
-        d = self._sqlc.query(queries)
+        d = defer.maybeDeferred(self._sqlc.query, queries, async=self._preferences)
         d.addCallback(self._collectSuccessful)
         d.addErrback(self._failure)
-
         # returning a Deferred will keep the framework from assuming the task
         # is done until the Deferred actually completes
         return d

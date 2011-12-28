@@ -20,12 +20,14 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.6'
+__version__ = '1.0.7'
 
 from string import upper, strip
+import threading
 import datetime
 import subprocess
 import os
+import signal
 import re
 DTPAT = re.compile(r'^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})')
 
@@ -150,6 +152,7 @@ class isqlCursor(object):
         Initialize a Cursor object. connection is a wsmanCnx object instance.
         """
         self._args = connection._args
+        self._timeout = connection._timeout
         self.rowcount = 0
         self.rownumber = -1
         self.arraysize = 1
@@ -167,7 +170,7 @@ class isqlCursor(object):
         if not self._description and self._queue:
             self._commit(self)
         if not self._description:
-            raise OperationalError, "No data available. execute() first."
+            raise OperationalError("No data available. execute() first.")
 
     def __del__(self):
         self.close()
@@ -205,8 +208,14 @@ class isqlCursor(object):
                                 stdout=subprocess.PIPE)
             queries = [q.strip().replace('\n',' ') for q in self._queue]
             del self._queue[:]
-            lines, err = p.communicate('%s\n'%'\n'.join(queries))
-            if err: raise OperationalError, ('00000', err.strip())
+            t = threading.Timer(self._timeout, os.kill, [p.pid, signal.SIGTERM])
+            t.start()
+            try:
+                lines, err = p.communicate('%s\n'%'\n'.join(queries))
+            except Exception, e:
+                err = t.isAlive() and str(e) or 'Operation timed out'
+            t.cancel()
+            if err: raise OperationalError(err.strip())
             for line in lines.splitlines():
                 if line.startswith('[ISQL]INFO:'): pass
                 elif line.strip() == '': pass
@@ -244,10 +253,8 @@ class isqlCursor(object):
             self._rows.extend(rows[1:])
             self.rowcount = len(self._rows)
             self.rownumber = 0
-        except OperationalError, e:
-            raise OperationalError, e
         except Exception, e:
-            raise OperationalError, e
+            raise OperationalError(e)
 
     def execute(self, operation, *args):
         """
@@ -261,7 +268,7 @@ class isqlCursor(object):
         guidelines.
         """
         if not self._args:
-            raise InterfaceError, "Connection closed."
+            raise InterfaceError("Connection closed.")
         self._description = None
         del self._rows[:]
         self.rownumber = -1
@@ -270,7 +277,8 @@ class isqlCursor(object):
         # because None is a valid value for format string.
 
         if (args != () and len(args) != 1):
-            raise TypeError, "execute takes 1 or 2 arguments (%d given)" % (len(args) + 1,)
+            raise TypeError("execute takes 1 or 2 arguments (%d given)" % (
+                                                            len(args) + 1,))
 
         if args != ():
             operation = operation%args[0]
@@ -358,6 +366,7 @@ class isqlCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
+        self._timeout = 20
         dsn = None
         uid = None
         pwd = None
@@ -374,6 +383,7 @@ class isqlCnx:
                 kwargs['servername'] = kwargs.pop(k)
             elif ku == 'ANSI':
                 isqlcmd=upper(str(kwargs.pop(k)))=='FALSE' and 'iusql' or 'isql'
+            elif ku == 'TIMEOUT': self._timeout = float(kwargs.pop(k))
         if not dsn:
             import md5
             newcs = ';'.join(('%s = %s' %o for o in kwargs.iteritems()))
@@ -441,6 +451,7 @@ def Connect(*args, **kwargs):
     cs            connection string
     uid           user to connect as
     pwd           user's password
+    timeout       query timeout in seconds
 
     Examples:
     con = pyisqldb.connect('DRIVER={MySQL};OPTION=3;PORT=3307;Database=information_schema;SERVER=127.0.0.1',

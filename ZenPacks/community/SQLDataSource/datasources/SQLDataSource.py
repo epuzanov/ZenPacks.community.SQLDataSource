@@ -13,16 +13,15 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.4 2011/12/14 18:22:43 egor Exp $"""
+$Id: SQLDataSource.py,v 2.5 2011/12/29 00:30:16 egor Exp $"""
 
-__version__ = "$Revision: 2.4 $"[11:-2]
+__version__ = "$Revision: 2.5 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
 from Products.ZenUtils.Utils import executeStreamCommand
 from Products.ZenWidgets import messaging
 from AccessControl import ClassSecurityInfo, Permissions
-from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
 from twisted.python.failure import Failure
 
 import cgi
@@ -175,6 +174,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
             )
             return self.callZenScreen(REQUEST)
         ttpc = getattr(self.rrdTemplate(), 'targetPythonClass', '')
+        from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
         cl = SQLClient(device)
         try:
             ccm, ccn = ttpc.rsplit('.', 1)
@@ -203,7 +203,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                         dp.id) for dp in self.getRRDDataPoints()])
             write('Executing query: "%s"'%sql)
             write('')
-            rows = cl.query({'t':(sql, {}, cs, properties)},True).get('t', [{}])
+            rows = cl.query({'t':(sql, {}, cs, properties)},False).get('t',[{}])
             write('|'.join(rows[0].keys()))
             for row in rows:
                 write('|'.join(map(str, row.values())))

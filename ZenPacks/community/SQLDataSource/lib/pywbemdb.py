@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.7'
+__version__ = '2.1.8'
 
 import socket
 from xml.sax import handler, make_parser
@@ -472,7 +472,7 @@ class wbemCursor(object):
 
         if (args != () and len(args) != 1):
             raise TypeError("execute takes 1 or 2 arguments (%d given)"%(
-                                                                len(args) + 1))
+                                                                len(args) + 1,))
 
         if args != ():
             operation = operation%args[0]
@@ -601,7 +601,7 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._timeout = int(kwargs.get('timeout', 30))
+        self._timeout = float(kwargs.get('timeout', 10))
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
@@ -635,24 +635,32 @@ class pywbemCnx:
                     'CIMMethod': methodname,
                     'CIMObject': self._namespace}
 
+        oldtimeout = None
         request = urllib2.Request(self._url, data, headers)
         if StrictVersion(urllib2.__version__) < '2.6':
             request.set_proxy = lambda *args: None
+            openerArgs = (request, None)
+            oldtimeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(self._timeout)
+        else:
+            openerArgs = (request, None, self._timeout)
 
         tryLimit = 5
         xml_repl = None
-        while not xml_repl:
-            tryLimit -= 1
-            try:
-                if not socket.getdefaulttimeout():
-                    socket.setdefaulttimeout(self._timeout)
-                xml_repl = self._urlOpener.open(request)
-            except urllib2.HTTPError, arg:
-                if arg.code in [401, 504] and tryLimit > 0: xml_repl = None
-                else: raise InterfaceError('HTTP error: %s' % arg.code)
-            except urllib2.URLError, arg:
-                if arg.reason[0] in [32, 104] and tryLimit > 0: xml_repl = None
-                else: raise InterfaceError('socket error: %s' % arg.reason)
+        try:
+            while not xml_repl:
+                tryLimit -= 1
+                try:
+                    xml_repl = self._urlOpener.open(*openerArgs)
+                except urllib2.HTTPError, arg:
+                    if not (arg.code in [401, 504] and tryLimit > 0):
+                        raise InterfaceError('HTTP error: %s' % arg.code)
+                except urllib2.URLError, arg:
+                    if not (arg.reason[0] in [32, 104] and tryLimit > 0):
+                        raise InterfaceError('socket error: %s' % arg.reason)
+        finally:
+            if oldtimeout:
+                socket.setdefaulttimeout(oldtimeout)
         return xml_repl
 
 
@@ -663,7 +671,7 @@ class pywbemCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        socket.setdefaulttimeout(None)
+        return
 
     def commit(self):
         """
@@ -703,7 +711,7 @@ def Connect(*args, **kwargs):
     password      user's password
     host          host name
     namespace     namespace
-    timeout       query timeout
+    timeout       query timeout in seconds
     dialect       query dialect
     key_file      key file for Certificate based Authorization
     cert_file     cert file for Certificate based Authorization

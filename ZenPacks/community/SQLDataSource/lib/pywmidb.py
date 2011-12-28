@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.6'
+__version__ = '1.4.7'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -29,6 +29,10 @@ import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
+
+WBEM_S_TIMEDOUT = 0x40004L
+
+WERR_BADFUNC = 1
 
 try:
     from pysamba.library import *
@@ -59,11 +63,6 @@ WbemQualifier._fields_ = [
     ('cimtype', uint32_t),
     ('value', CIMVAR),
     ]
-
-
-WBEM_S_TIMEDOUT = 0x40004L
-
-WERR_BADFUNC = 1
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -196,7 +195,7 @@ class wmiCursor(object):
         self._connection = connection
         self.description = None
         self.rownumber = -1
-        self.arraysize = 1
+        self.arraysize = connection._wmibatchSize
         self._kbs = {}
         self._pEnum = None
 
@@ -302,7 +301,7 @@ class wmiCursor(object):
 
         if (args != () and len(args) != 1):
             raise TypeError("execute takes 1 or 2 arguments (%d given)"%(
-                                                                len(args) + 1))
+                                                                len(args) + 1,))
 
         if args != ():
             operation = operation%args[0]
@@ -490,11 +489,16 @@ class pysambaCnx:
     """
 
     def __init__(self, *args, **kwargs):
+        self._timeout = float(kwargs.get('timeout', 10))
+        if self._timeout > 0: self._timeout = int(self._timeout * 1000)
         self._host = kwargs.get('host', 'localhost')
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
-        self._wmibatchSize = kwargs.get('wmibatchSize', 5)
+        self._wmibatchSize = int(kwargs.get('wmibatchSize', 1))
         creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
+        namespace = kwargs.get('namespace', 'root/cimv2')
+        locale = kwargs.get('locale', None)
+        ntlmv2 = kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no'
         self._lock = Lock()
         try:
             self._lock.acquire()
@@ -517,22 +521,21 @@ class pysambaCnx:
                 library.cli_credentials_set_conf(cred)
                 library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
                 library.dcom_client_init(self._ctx, cred)
-                library.lp_do_parameter(-1, "client ntlmv2 auth",
-                                    kwargs.get('ntlmv2', 'no').lower())
+                library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
 
                 flags = uint32_t()
                 flags.value = 0
                 result = library.WBEM_ConnectServer(
-                        self._ctx,                             # com_ctx
-                        self._host,                            # server
-                        kwargs.get('namespace', 'root/cimv2'), # namespace
-                        None,                                  # user
-                        None,                                  # password
-                        kwargs.get('locale', None),            # locale
-                        flags.value,                           # flags
-                        None,                                  # authority 
-                        POINTER(IWbemContext)(),               # wbem_ctx 
-                        byref(self._pWS))                      # services 
+                            self._ctx,                             # com_ctx
+                            self._host,                            # server
+                            namespace,                             # namespace
+                            None,                                  # user
+                            None,                                  # password
+                            locale,                                # locale
+                            flags.value,                           # flags
+                            None,                                  # authority 
+                            POINTER(IWbemContext)(),               # wbem_ctx 
+                            byref(self._pWS))                      # services 
                 WERR_CHECK(result, self._host, "Connect")
 
             except WError, e:
@@ -565,7 +568,7 @@ class pysambaCnx:
                 result = library.IEnumWbemClassObject_SmartNext(
                             cursor._pEnum,
                             self._ctx,
-                            -1,
+                            self._timeout,
                             1,
                             objs,
                             byref(ocount))
@@ -596,7 +599,7 @@ class pysambaCnx:
                 result = library.IEnumWbemClassObject_SmartNext(
                             cursor._pEnum,
                             self._ctx,
-                            -1,
+                            self._timeout,
                             size,
                             objs,
                             byref(ocount))
@@ -682,6 +685,7 @@ def Connect(*args, **kwargs):
     password      user's password
     host          host name
     namespace     namespace
+    timeout       query timeout in seconds
 
     Examples:
     con  =  pywmidb.connect(user='user',

@@ -12,9 +12,9 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.10 2011/12/18 21:11:52 egor Exp $"""
+$Id: SQLPlugin.py,v 2.11 2011/12/26 23:24:34 egor Exp $"""
 
-__version__ = "$Revision: 2.10 $"[11:-2]
+__version__ = "$Revision: 2.11 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from twisted.python.failure import Failure
@@ -28,45 +28,43 @@ class SQLPlugin(CollectorPlugin):
     """
     transport = "python"
     tables = {}
-    cspropname = 'zConnectionString'
+    cspropname = "zConnectionString"
+    csProperties = (
+        ('host', 'manageIp', 'localhost'),
+        ('user', 'zWinUser', ''),
+        ('password', 'zWinPassword', ''),
+        )
     deviceProperties = CollectorPlugin.deviceProperties  +  ('zWinUser',
                                                             'zWinPassword',
                                                             )
 
-
     def prepareCS(self, device):
         args = [getattr(device, self.cspropname, '') or \
-                        "'pywbemdb',scheme='https',host='localhost',port=5989"]
+                                "'pywbemdb',scheme='https',host='localhost'"]
         kwkeys = map(lower, eval('(lambda *arg,**kws:kws)(%s)'%args[0]).keys())
-        if 'host' not in kwkeys:
-            args.append("host='%s'"%getattr(device, 'manageIp', 'localhost'))
-        if 'user' not in kwkeys:
-            args.append("user='%s'"%getattr(device, 'zWinUser', ''))
-        if 'password' not in kwkeys:
-            args.append("password='%s'"%getattr(device, 'zWinPassword', ''))
+        for csPropName, dPropName, defVal in self.csProperties:
+            if csPropName in kwkeys: continue
+            val = getattr(device, dPropName, defVal)
+            if isinstance(val, (str, unicode)): val = "'%s'"%val
+            args.append("=".join((csPropName, val)))
         return ','.join(args)
-
 
     def queries(self, device=None):
         return self.tables
 
-
     def prepareQueries(self, device=None):
         return self.queries(device)
-
 
     def collect(self, device, log):
         results = {}
         cl = SQLClient(device)
-        try: results.update(cl.query(self.prepareQueries(device), True))
+        try: results.update(cl.query(self.prepareQueries(device), async=False))
         except Exception, ex: pass #log.error("Error: %s", ex)
         cl.close()
         cl = None
         return results
 
-
     def preprocess(self, results, log):
         for table in results.keys():
             if isinstance(results[table], Failure): results[table] = []
         return results
-
