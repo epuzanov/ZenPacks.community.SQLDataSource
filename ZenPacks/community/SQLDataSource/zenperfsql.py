@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.14 2011/12/26 21:01:27 egor Exp $"""
+$Id: zenperfsql.py,v 2.15 2011/12/29 20:52:23 egor Exp $"""
 
-__version__ = "$Revision: 2.14 $"[11:-2]
+__version__ = "$Revision: 2.15 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -182,9 +182,9 @@ class ZenPerfSqlPreferences(object):
         parser.add_option('--debug', dest='debug', default=False,
                                action='store_true',
                                help='Increase logging verbosity.')
-        parser.add_option('--async', dest='async', default=False,
+        parser.add_option('--sync', dest='sync', default=False,
                                action="store_true",
-                               help="Execute Queries Asynchronously.")
+                               help="Force Synchronous query execution.")
 
 
     def postStartup(self):
@@ -363,7 +363,8 @@ class ZenPerfSqlTask(ObservableMixin):
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
         queries = self._taskConfig.queries[self._datapoints[0][0]].copy()
         self._sqlc = SQLClient(self._taskConfig)
-        d = defer.maybeDeferred(self._sqlc.query, queries, async=self._preferences)
+        d = defer.maybeDeferred(self._sqlc.query, queries,
+                                            sync=self._preferences.options.sync)
         d.addCallback(self._collectSuccessful)
         d.addErrback(self._failure)
         # returning a Deferred will keep the framework from assuming the task
