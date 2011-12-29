@@ -10,11 +10,11 @@
 
 __doc__="""SQLClient
 
-Gets performance data over python DB API.
+Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 2.18 2011/12/29 21:49:59 egor Exp $"""
+$Id: SQLClient.py,v 2.19 2011/12/29 23:40:12 egor Exp $"""
 
-__version__ = "$Revision: 2.18 $"[11:-2]
+__version__ = "$Revision: 2.19 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath, unused
@@ -60,7 +60,7 @@ def _filename(device):
 class BadCredentials(Exception): pass
 
 
-class dbQuery(object):
+class asyncQuery(object):
 
     def __init__(self, sqlp, results, host):
         self.sql = ''
@@ -153,12 +153,15 @@ class dbQuery(object):
         return d
 
 
-class dbPool(object):
+class asyncPool(object):
+
+    poolType = 'Asynchronous'
 
     def __init__(self, cs):
         self.cs = cs
         self.queries = []
         self.pool = None
+        self.connection = None
 
     def __del__(self):
         self.close()
@@ -167,6 +170,21 @@ class dbPool(object):
         if self.pool:
             self.pool.close()
         self.pool = None
+        if self.connection:
+            self.connection.close()
+        self.connection = None
+        if self.queries:
+            self.cancel()
+
+    def cancel(self, err=None):
+        log.debug('%s pool %s is cancelled.'%(self.poolType, self))
+        if not err:
+            err = 'Query cancelled'
+        errcount = 0
+        while self.queries:
+            query = self.queries.pop(0)
+            errcount += query.parseError(err)
+        return errcount
 
     def parseCS(self, cs=None):
         try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
@@ -192,52 +210,41 @@ class dbPool(object):
             if query.sqlp != sqlp: continue
             query.add(pname, tname, task)
             return
-        self.queries.append(dbQuery(task[0], results, host))
+        self.queries.append(asyncQuery(task[0], results, host))
         self.queries[-1].add(pname, tname, task)
 
     def connect(self):
-        def inner(driver):
-            args, kwargs = self.parseCS(self.cs)
-            kwargs.update({'cp_min':1,'cp_max':1})
-            yield defer.succeed(adbapi.ConnectionPool(*args, **kwargs))
-            self.pool = driver.next()
-        return drive(inner)
+        args, kwargs = self.parseCS(self.cs)
+        kwargs.update({'cp_min':1,'cp_max':1})
+        self.pool = adbapi.ConnectionPool(*args, **kwargs)
+        return defer.succeed(None)
 
     def run(self):
         def inner(driver):
+            log.debug('%s pool %s is running.'%(self.poolType, self))
+            qlen = len(self.queries)
             errcount = 0
             try:
                 yield self.connect()
                 driver.next()
+            except Failure, e:
+                e.cleanFailure()
+                errcount += self.cancel(e.getErrorMessage())
             except Exception, e:
-                for query in self.queries:
-                    query.parseError(e)
-                self.close()
-                e.raiseException()
-            for query in self.queries:
+                errcount += self.cancel(str(e))
+            while self.queries:
+                query = self.queries.pop(0)
                 yield query.run(self.pool)
                 errcount += driver.next()
             self.close()
-            yield defer.succeed(errcount == len(self.queries) and 1 or 0)
+            yield defer.succeed(errcount == qlen and 1 or 0)
             driver.next()
         return drive(inner)
 
 
-class syncPool(dbPool):
+class syncPool(asyncPool):
 
-    def __init__(self, cs):
-        self.cs = cs
-        self.queries = []
-        self.pool = None
-        self.connection = None
-
-    def close(self):
-        if self.pool:
-            self.pool.close()
-        self.pool = None
-        if self.connection:
-            self.connection.close()
-        self.connection = None
+    poolType = 'Synchronous'
 
     def connect(self):
         args, kwargs = self.parseCS(self.cs)
@@ -248,25 +255,25 @@ class syncPool(dbPool):
         self.pool = self.connection.cursor()
 
     def run(self):
+        log.debug('%s pool %s is running.'%(self.poolType, self))
+        qlen = len(self.queries)
         errcount = 0
         try:
             self.connect()
         except Exception, e:
-            for query in self.queries:
-                query.parseError(e)
-            self.close()
-            raise e
-        for query in self.queries:
+            errcount += self.cancel(str(e))
+        while self.queries:
+            query = self.queries.pop(0)
             try:
                 res = query.execute(self.pool, query.sql)
                 errcount += query.parseResult(res)
             except Exception, e:
                 errcount += query.parseError(e)
         self.close()
-        return errcount == len(self.queries) and 1 or 0
+        return errcount == qlen and 1 or 0
 
 
-class wmiQuery(dbQuery):
+class wmiQuery(asyncQuery):
 
     def parseResult(self, instances):
         for instance in instances:
@@ -338,7 +345,9 @@ class wmiQuery(dbQuery):
         return d
 
 
-class wmiPool(dbPool):
+class wmiPool(asyncPool):
+
+    poolType = 'pysamba'
 
     def add(self, pname, tname, task, results, host):
         sqlp = task[0]
@@ -399,6 +408,7 @@ class SQLClient(BaseClient):
         self.datacollector = datacollector
         self.plugins = plugins
         self.results = []
+        self._queue = {}
 
     def __del__(self):
         self.close()
@@ -406,41 +416,45 @@ class SQLClient(BaseClient):
     def close(self):
         del self.plugins[:]
         del self.results[:]
+        while self._queue:
+            cs, pool = self._queue.popitem()
+            pool.close()
 
     def query(self, tasks={}, sync=True):
-        queue = []
         results = {}
         for tname, task in tasks.iteritems():
             if type(tname) is tuple: pname, tname = tname
             else: pname = None
-            poolid = 0
-            for pool in queue:
-                if pool.cs == task[2]: break
-                poolid += 1
-            if poolid > len(queue) - 1:
-                if sync: queue.append(syncPool(task[2]))
-                elif task[2].startswith("'pywmidb'"):
-                    queue.append(syncPool(task[2]))
-                else: queue.append(dbPool(task[2])) 
             results.setdefault(pname, {})[tname] = []
-            queue[poolid].add(pname, tname, task, results, self.host)
+            cs = task[2]
+            if sync:
+                pool = self._queue.setdefault(cs, syncPool(cs))
+            elif task[2].startswith("'pywmidb'"):
+                pool = self._queue.setdefault(cs, syncPool(cs))
+            else:
+                pool = self._queue.setdefault(cs, asyncPool(cs))
+            pool.add(pname, tname, task, results, self.host)
         if sync:
             errcount = 0
-            qlen = len(queue)
-            for pool in queue:
+            qlen = len(self._queue)
+            while self._queue:
+                cs, pool = self._queue.popitem()
                 try: errcount += pool.run()
                 except Exception, e: errcount += 1
+                pool.close()
             if errcount == qlen:
                 results.values()[0].values()[0].raiseException()
             return results.pop(None, results)
         def inner(driver):
             errcount = 0
-            qlen = len(queue)
-            for pool in queue:
+            qlen = len(self._queue)
+            while self._queue:
+                cs, pool = self._queue.popitem()
                 try:
                     yield defer.maybeDeferred(pool.run)
                     errcount += driver.next()
                 except Exception, e: errcount += 1
+                pool.close()
             if errcount == qlen:
                 results[None] = results.values()[0].values()[0]
             yield defer.succeed(results.pop(None, results))
