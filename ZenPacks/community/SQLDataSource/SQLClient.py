@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB API.
 
-$Id: SQLClient.py,v 2.18 2011/12/29 21:02:31 egor Exp $"""
+$Id: SQLClient.py,v 2.17 2011/12/28 20:07:25 egor Exp $"""
 
-__version__ = "$Revision: 2.18 $"[11:-2]
+__version__ = "$Revision: 2.17 $"[11:-2]
 
 import Globals
 from Products.ZenUtils.Utils import zenPath, unused
@@ -407,7 +407,7 @@ class SQLClient(BaseClient):
         del self.plugins[:]
         del self.results[:]
 
-    def query(self, tasks={}, sync=True):
+    def query(self, tasks={}, async=False):
         queue = []
         results = {}
         for tname, task in tasks.iteritems():
@@ -418,13 +418,13 @@ class SQLClient(BaseClient):
                 if pool.cs == task[2]: break
                 poolid += 1
             if poolid > len(queue) - 1:
-                if sync: queue.append(syncPool(task[2]))
+                if not async: queue.append(syncPool(task[2]))
                 elif task[2].startswith("'pywmidb'"):
                     queue.append(syncPool(task[2]))
                 else: queue.append(dbPool(task[2])) 
             results.setdefault(pname, {})[tname] = []
             queue[poolid].add(pname, tname, task, results, self.host)
-        if sync:
+        if not async:
             errcount = 0
             qlen = len(queue)
             for pool in queue:
@@ -454,7 +454,7 @@ class SQLClient(BaseClient):
                 pn = plugin.name()
                 for tn,t in (plugin.prepareQueries(self.device) or {}).iteritems():
                     tasks[(pn,tn)] = t
-            yield defer.maybeDeferred(self.query, tasks, sync=False)
+            yield defer.maybeDeferred(self.query, tasks, async=True)
             driver.next()
         d = drive(inner)
         def finish(results):
@@ -550,7 +550,7 @@ if __name__ == "__main__":
             break
         sp = None
     else:
-        try: results = cl.query({'t':(query, {}, cs, columns)})
+        try: results = cl.query({'t':(query, {}, cs, columns)}, async=False)
         except Exception, e: results = Failure(e)
     cl.close()
     if isinstance(results, Failure):
