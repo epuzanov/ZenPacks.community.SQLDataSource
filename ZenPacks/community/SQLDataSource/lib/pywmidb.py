@@ -1,6 +1,6 @@
 #***************************************************************************
 # pywmidb - A DB API v2.0 compatible interface to WMI.
-# Copyright (C) 2011 Egor Puzanov.
+# Copyright (C) 2011, 2012 Egor Puzanov.
 #
 #***************************************************************************
 # This library is free software; you can redistribute it and/or
@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.7'
+__version__ = '1.4.8'
 
 from datetime import datetime, timedelta
 from distutils.version import StrictVersion
@@ -47,7 +47,7 @@ library.dcom_client_init.restype = c_void_p
 library.dcom_client_init.argtypes = [POINTER(com_context), c_void_p]
 library.com_init_ctx.restype = WERROR
 library.IWbemServices_ExecQuery.restype = WERROR
-library.IEnumWbemClassObject_Reset.restype = WERROR
+#library.IEnumWbemClassObject_Reset.restype = WERROR
 library.IUnknown_Release.restype = WERROR
 
 if StrictVersion(PSVERSION) < '1.3.10':
@@ -198,6 +198,7 @@ class wmiCursor(object):
         self.arraysize = connection._wmibatchSize
         self._kbs = {}
         self._pEnum = None
+        self._firstrow = None
 
     connection = property(lambda self: self._getConnection())
     def _getConnection(self):
@@ -217,6 +218,7 @@ class wmiCursor(object):
         """
         Release Enumerator and reset objects buffer.
         """
+        self._firstrow = None
         self._kbs.clear()
         self.description = None
         if self._pEnum: self._connection._release(self)
@@ -250,7 +252,10 @@ class wmiCursor(object):
         if typeval == CIM_REAL32: return float(v.v_uint32)
         if typeval == CIM_REAL64: return float(v.v_uint64)
         if typeval == CIM_BOOLEAN: return bool(v.v_boolean)
-        if typeval in (CIM_STRING,CIM_REFERENCE): return v.v_string
+        if typeval == CIM_REFERENCE:
+            if not v.v_string.startswith(r'\\'): return v.v_string
+            return v.v_string.split(':', 1)[-1]
+        if typeval == CIM_STRING: return v.v_string
         if typeval == CIM_CHAR16: return v.v_string.decode('utf16')
         if typeval == CIM_OBJECT: return v.v_string
         if typeval == CIM_DATETIME:
@@ -331,9 +336,11 @@ class wmiCursor(object):
                 objs = None
                 return
             klass = objs[0].contents.obj_class.contents
-            cimclass = getattr(klass, '__CLASS', '')
-            cimnamespace = getattr(objs[0].contents, '__NAMESPACE',
-                                                        '').replace('\\', '/')
+            inst = objs[0].contents.instance.contents
+            pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
+                    '__NAMESPACE':getattr(objs[0].contents,
+                                        '__NAMESPACE', '').replace('\\', '/')}
+            iPath = []
             dDict = {}
             maxlen = {}
             kbKeys = []
@@ -341,10 +348,21 @@ class wmiCursor(object):
                 prop = klass.properties[j]
                 if not prop.name: continue
                 uName = prop.name.upper()
+                pType = prop.desc.contents.cimtype & CIM_TYPEMASK
+                pVal = self._convert(inst.data[j], pType)
+                pdict[uName] = pVal
+                if self._kbs.get(prop.name, pVal) != pVal:
+                    pdict.clear()
+                    break
                 for i in range(prop.desc.contents.qualifiers.count):
                     q = prop.desc.contents.qualifiers.item[i].contents
                     if q.name in ['key']:
-                        if uName not in kbKeys: kbKeys.append(uName)
+                        if uName not in kbKeys:
+                            kbKeys.append(uName)
+                            if pType == NUMBER:
+                                iPath.append('%s=%s'%(prop.name, pVal))
+                            else:
+                                iPath.append('%s="%s"'%(prop.name, pVal))
                     if q.name == 'MaxLen':
                         maxlen[uName] = self._convert(q.value, q.cimtype)
                 dDict[uName] = (prop.name,
@@ -358,6 +376,10 @@ class wmiCursor(object):
                 props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
             self.description = tuple([dDict.get(p,(p, 8, None, None, None,
                                                 None, None)) for p in props])
+            if '__PATH' in props:
+                pdict['__PATH'] = '%s.%s'%(pdict['__CLASS'], ','.join(iPath))
+            self._firstrow = tuple([pdict.get(p, None) for p in props])
+            pdict.clear()
             if self.description: self.rownumber = 0
 
         except WError, e:
@@ -403,6 +425,12 @@ class wmiCursor(object):
         if size < 1: size = self.arraysize
         if lastrow > -1: lastrow = self.rownumber + size
         results = []
+        if self._firstrow:
+            results.append(self._firstrow)
+            self._firstrow = None
+            self.rownumber += 1
+            if self.rownumber == lastrow:
+                return results
         props = [p[0].upper() for p in self.description]
         objs = None
         objs = (POINTER(WbemClassObject) * size)()
@@ -495,9 +523,9 @@ class pysambaCnx:
         self._ctx = POINTER(com_context)()
         self._pWS = POINTER(IWbemServices)()
         self._wmibatchSize = int(kwargs.get('wmibatchSize', 1))
+        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._locale = kwargs.get('locale', None)
         creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
-        namespace = kwargs.get('namespace', 'root/cimv2')
-        locale = kwargs.get('locale', None)
         ntlmv2 = kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no'
         self._lock = Lock()
         try:
@@ -519,19 +547,36 @@ class pysambaCnx:
 
                 cred = library.cli_credentials_init(self._ctx)
                 library.cli_credentials_set_conf(cred)
-                library.cli_credentials_parse_string(cred, creds, CRED_SPECIFIED)
+                library.cli_credentials_parse_string(cred, creds,CRED_SPECIFIED)
                 library.dcom_client_init(self._ctx, cred)
                 library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
 
+            except WError, e:
+                self.close()
+                raise InterfaceError(e)
+
+            except Exception, e:
+                self.close()
+                raise InterfaceError(e)
+        finally: self._lock.release()
+        self._connect()
+
+    def _connect(self):
+        """
+        Connect to server
+        """
+        try:
+            self._lock.acquire()
+            try:
                 flags = uint32_t()
                 flags.value = 0
                 result = library.WBEM_ConnectServer(
                             self._ctx,                             # com_ctx
                             self._host,                            # server
-                            namespace,                             # namespace
+                            self._namespace,                       # namespace
                             None,                                  # user
                             None,                                  # password
-                            locale,                                # locale
+                            self._locale,                          # locale
                             flags.value,                           # flags
                             None,                                  # authority 
                             POINTER(IWbemContext)(),               # wbem_ctx 
@@ -560,11 +605,15 @@ class pysambaCnx:
                             self._ctx,
                             "WQL",
                             operation,
+                            WBEM_FLAG_FORWARD_ONLY | \
                             WBEM_FLAG_RETURN_IMMEDIATELY | \
                             WBEM_FLAG_ENSURE_LOCATABLE,
                             None,
                             byref(cursor._pEnum))
                 WERR_CHECK(result, self._host, "ExecQuery")
+#                result = library.IEnumWbemClassObject_Reset(cursor._pEnum,
+#                                                                    self._ctx)
+#                WERR_CHECK(result, self._host, "Reset result of WMI query.")
                 result = library.IEnumWbemClassObject_SmartNext(
                             cursor._pEnum,
                             self._ctx,
@@ -573,9 +622,6 @@ class pysambaCnx:
                             objs,
                             byref(ocount))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
-                result = library.IEnumWbemClassObject_Reset(cursor._pEnum,
-                                                                    self._ctx)
-                WERR_CHECK(result, self._host, "Reset result of WMI query.")
                 return ocount.value
 
             except WError, e:
@@ -604,7 +650,8 @@ class pysambaCnx:
                             objs,
                             byref(ocount))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
-                if ocount.value > 0: return ocount.value
+                if ocount.value > 0:
+                    return ocount.value
                 objs = None
                 if cursor._pEnum:
                     try:

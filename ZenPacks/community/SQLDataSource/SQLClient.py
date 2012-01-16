@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2009, 2010, 2011 Egor Puzanov.
+# Copyright (C) 2009-2012 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,10 +12,12 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 2.19 2011/12/29 23:40:12 egor Exp $"""
+$Id: SQLClient.py,v 2.20 2012/01/16 18:32:39 egor Exp $"""
 
-__version__ = "$Revision: 2.19 $"[11:-2]
+__version__ = "$Revision: 2.20 $"[11:-2]
 
+if __name__ == "__main__":
+    from pysamba.twisted.reactor import reactor, eventContext
 import Globals
 from Products.ZenUtils.Utils import zenPath, unused
 from Products.ZenUtils.Driver import drive
@@ -311,8 +313,7 @@ class wmiQuery(asyncQuery):
 
     def run(self, pool):
         def inner(driver):
-            from pysamba.twisted.callback import WMIFailure
-            results = []
+            errcount = 0
             query = self.sql
             log.debug("WMI Query: %s", query)
             try:
@@ -323,27 +324,17 @@ class wmiQuery(asyncQuery):
                     yield result.fetchSome()
                     more = driver.next()
                     if not more: break
-                    results.extend(more)
-                yield defer.succeed(results)
-                driver.next()
-            except WMIFailure, ex:
-                msg = 'Received %s from query: %s'
-
-                # Look for specific errors that should be equated
-                # to an empty result set.
-                if str(ex) in (
+                    self.parseResult(more)
+            except Exception, ex:
+                if str(ex) not in (
                     "NT code 0x80041010",
                     "WBEM_E_INVALID_CLASS",
-                    ):
-                    log.debug(msg % (ex, query))
-                else:
-                    log.error(msg % (ex, query))
-                    raise
-        d = drive(inner)
-        d.addCallback(self.parseResult)
-        d.addErrback(self.parseError)
-        return d
-
+                    ): pass
+                errcount = 1
+                self.parseError(ex)
+            yield defer.succeed(errcount)
+            driver.next()
+        return drive(inner)
 
 class wmiPool(asyncPool):
 
@@ -359,7 +350,6 @@ class wmiPool(asyncPool):
         self.queries[-1].add(pname, tname, task)
 
     def connect(self):
-        from pysamba.twisted.reactor import eventContext
         args, kwargs = self.parseCS(self.cs)
         host = kwargs.get('host', 'localhost')
         user = kwargs.get('user', '')
@@ -481,7 +471,6 @@ class SQLClient(BaseClient):
             if self.datacollector:
                 self.datacollector.clientFinished(self)
             else:
-                from twisted.internet import reactor
                 reactor.stop()
         d.addBoth(finish)
         return d
@@ -555,7 +544,6 @@ if __name__ == "__main__":
         sp = SQLPlugin({'t': (query, {}, cs, columns)})
         cl.plugins.append(sp)
         cl.run()
-        from twisted.internet import reactor
         reactor.run()
         results = Failure('ERROR:zen.SQLClient:No data received.')
         for plugin, result in cl.getResults():
