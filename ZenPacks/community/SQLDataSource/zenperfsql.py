@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2010, 2011 Egor Puzanov.
+# Copyright (C) 2010-2012 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 PB daemon-izable base class for creating sql collectors
 
-$Id: zenperfsql.py,v 2.15 2011/12/29 20:52:23 egor Exp $"""
+$Id: zenperfsql.py,v 2.16 2012/03/23 23:15:48 egor Exp $"""
 
-__version__ = "$Revision: 2.15 $"[11:-2]
+__version__ = "$Revision: 2.16 $"[11:-2]
 
 import logging
 import pysamba.twisted.reactor
@@ -22,7 +22,8 @@ import pysamba.twisted.reactor
 import Globals
 import zope.component
 import zope.interface
-from DateTime import DateTime
+from datetime import datetime
+import time
 
 from copy import copy
 import md5
@@ -41,7 +42,7 @@ from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         TaskStates
 from Products.ZenEvents.ZenEventClasses import Error, Clear
 from Products.ZenUtils.observable import ObservableMixin
-from SQLClient import SQLClient, SQLPlugin
+from SQLClient import SQLClient
 
 # We retrieve our configuration data remotely via a Twisted PerspectiveBroker
 # connection. To do so, we need to import the class that will be used by the
@@ -51,6 +52,10 @@ from Products.ZenCollector.services.config import DeviceProxy
 unused(DeviceProxy)
 unused(Globals)
 
+try:
+    from Products.ZenCollector.pools import getPool
+except:
+    from SQLClient import getPool
 #
 # creating a logging context for this module to use
 #
@@ -75,7 +80,8 @@ def rrpn(expression, value):
         tokens = expression.split(',')
         tokens.reverse()
         for token in tokens:
-            if token == 'now': token = DateTime()._t
+            if token == 'now':
+                token = time.time()
             try:
                 stack.append(float(token))
             except ValueError:
@@ -182,9 +188,6 @@ class ZenPerfSqlPreferences(object):
         parser.add_option('--debug', dest='debug', default=False,
                                action='store_true',
                                help='Increase logging verbosity.')
-        parser.add_option('--sync', dest='sync', default=False,
-                               action="store_true",
-                               help="Force Synchronous query execution.")
 
 
     def postStartup(self):
@@ -233,7 +236,9 @@ class ZenPerfSqlTask(ObservableMixin):
         self._eventService = zope.component.queryUtility(IEventService)
         self._preferences = zope.component.queryUtility(ICollectorPreferences,
                                                         "zenperfsql")
+        self._connectionString = taskConfig.datapoints[0][0]
         self._sqlc = None
+        self._pool = getPool('adbapi executors')
 
     def _failure(self, result, comp=None):
         """
@@ -284,7 +289,8 @@ class ZenPerfSqlTask(ObservableMixin):
                 events.append(event)
         if len(errors) == len(components) > 0:
             event = errors[0]
-            del event['component']
+            if 'component' in event:
+                del event['component']
             event['eventClass'] = '/Status/PyDBAPI'
             events.append(event)
         else:
@@ -298,6 +304,7 @@ class ZenPerfSqlTask(ObservableMixin):
         Callback for a successful fetch of services from the remote device.
         """
         self.state = ZenPerfSqlTask.STATE_SQLC_PROCESS
+        self._sqlc = None
 
         log.debug("Successful collection from %s [%s], results=%s",
                   self._devId, self._manageIp, results)
@@ -316,7 +323,8 @@ class ZenPerfSqlTask(ObservableMixin):
                 dpvalue = d.get(alias, None)
                 if dpvalue == None or dpvalue == '': continue
                 elif type(dpvalue) is list: dpvalue = dpvalue[0]
-                elif isinstance(dpvalue, DateTime): dpvalue = dpvalue._t
+                elif isinstance(dpvalue, datetime):
+                    dpvalue = time.mktime(dpvalue.timetuple())
                 if expr:
                     if expr.__contains__(':'):
                         for vmap in expr.split(','):
@@ -354,23 +362,40 @@ class ZenPerfSqlTask(ObservableMixin):
         self._cleanup()
 
     def _cleanup(self):
-        if self._sqlc: self._sqlc.close()
         self._sqlc = None
 
     def doTask(self):
         log.debug("Polling for SQL data from %s [%s]", 
                                                     self._devId, self._manageIp)
         self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
-        queries = self._taskConfig.queries[self._datapoints[0][0]].copy()
+        queries = self._taskConfig.queries[self._connectionString].copy()
         self._sqlc = SQLClient(self._taskConfig)
-        d = defer.maybeDeferred(self._sqlc.query, queries,
-                                            sync=self._preferences.options.sync)
+        d = self._sqlc.query(queries, sync=False, plugin='zenperfsql')
         d.addCallback(self._collectSuccessful)
         d.addErrback(self._failure)
         # returning a Deferred will keep the framework from assuming the task
         # is done until the Deferred actually completes
         return d
 
+    def displayStatistics(self):
+        """
+        Called by the collector framework scheduler, and allows us to
+        see how each task is doing.
+        """
+        display = "SQL Pools: %s\n"%len(self._pool)
+        for n, p in self._pool.iteritems():
+            display += '%s\n'%n
+            if 0 < log.getEffectiveLevel() < 11:
+                if p._cs:
+                    display += '\tconnection string: %s\n'%p._cs
+                elif p._taskQueue:
+                    display += '\tconnection string: %s\n'%p._taskQueue[0]._cs
+            display += '\tpool running: %s\n'%getattr(p._connection,'running',False)
+            display += '\ttasks running: %s\n'%p._running
+            display += '\ttasks queue: %s\n'%len(p._taskQueue)
+            for t in p._taskQueue:
+                display += '\t\t%s\n'%t._sql
+        return display
 
 #
 # Collector Daemon Main entry point
@@ -381,3 +406,4 @@ if __name__ == '__main__':
     myTaskSplitter = ZenPerfSqlTaskSplitter(myTaskFactory)
     daemon = CollectorDaemon(myPreferences, myTaskSplitter)
     daemon.run()
+
