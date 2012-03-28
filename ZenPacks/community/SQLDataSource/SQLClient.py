@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.0 2012/03/15 19:00:45 egor Exp $"""
+$Id: SQLClient.py,v 3.1 2012/03/28 23:05:12 egor Exp $"""
 
-__version__ = "$Revision: 3.0 $"[11:-2]
+__version__ = "$Revision: 3.1 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -133,7 +133,7 @@ class adbapiExecutor(object):
     def queued(self):
         return len(self._taskQueue)
 
-    def submit(self, cs, name, sql, columns={}, keybindings={}, timeout=20):
+    def submit(self, cs, name, sql, columns=[], keybindings={}, timeout=20):
         """
         submit a query to be executed. A deferred will be returned with the
         the result of the query.
@@ -240,9 +240,9 @@ class adbapiTask(object):
         for deferred, kc, kv in self._deferreds:
             deferred.errback(results.getErrorMessage())
 
-    def addTask(self, deferred, columns={}, keybindings={}):
+    def addTask(self, deferred, columns=[], keybindings={}):
         if columns:
-            self._columns.update(map(lambda v: v.lower(), columns.values()))
+            self._columns.update(map(lambda v: v.lower(), columns))
         if keybindings:
             kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
                                             for k in keybindings.iteritems()])
@@ -306,7 +306,7 @@ class SQLClient(BaseClient):
                 sqlp, kbs, cs, columns, sql = task
             dbapiName = cs.split(',', 1)[0].strip('\'"')
             executor = self._pools.setdefault(dbapiName, adbapiExecutor())
-            deferred = executor.submit(cs, sqlp, sql, columns, kbs)
+            deferred = executor.submit(cs, sqlp, sql, columns.values(), kbs)
             deferred.addCallback(self.parseResult, plugin, sql, columns)
             deferred.addErrback(self.parseError, plugin, sql, cs)
             deferred.addBoth(self.addResult, table, dbapiName)
@@ -335,7 +335,7 @@ class SQLClient(BaseClient):
                     sqlp, kbs, cs, columns, sql = task
                 dbapiName = cs.split(',', 1)[0].strip('\'"')
                 executor = self._pools.setdefault(dbapiName, adbapiExecutor())
-                deferred = executor.submit(cs, sqlp, sql, columns, kbs)
+                deferred = executor.submit(cs, sqlp, sql, columns.values(), kbs)
                 deferred.addCallback(self.parseResult, plugin.name(), sql, columns)
                 deferred.addErrback(self.parseError, plugin.name(), sql, cs)
                 deferred.addBoth(self.addResult, table, dbapiName)
@@ -550,7 +550,7 @@ if __name__ == "__main__":
         try:
             results = cl.query({'t':(query, {}, cs, columns)})
         except Exception, e:
-            results = {'t', Failure(e)}
+            results = {'t':Failure(e)}
     results = results.get('t', Failure('ERROR:zen.SQLClient:No data received.'))
     if isinstance(results, Failure):
         print results.getErrorMessage()
@@ -560,3 +560,4 @@ if __name__ == "__main__":
     print "|".join(columns.values())
     for row in results:
         print "|".join([str(row.get(dpname,'')) for dpname in columns.values()])
+

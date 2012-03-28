@@ -10,26 +10,30 @@
 
 __doc__="""zenperfsql
 
-PB daemon-izable base class for creating sql collectors
+Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 2.16 2012/03/23 23:15:48 egor Exp $"""
+$Id: zenperfsql.py,v 3.0 2012/03/28 23:08:25 egor Exp $"""
 
-__version__ = "$Revision: 2.16 $"[11:-2]
+__version__ = "$Revision: 3.0 $"[11:-2]
 
+import time
+from datetime import datetime
 import logging
-import pysamba.twisted.reactor
+log = logging.getLogger("zen.zenperfsql")
+from copy import copy
+
+from twisted.internet import reactor, defer, error
+from twisted.python.failure import Failure
+
+from twisted.spread import pb
 
 import Globals
-import zope.component
 import zope.interface
-from datetime import datetime
-import time
 
-from copy import copy
-import md5
-
-from twisted.internet import defer, reactor
-from twisted.python.failure import Failure
+from Products.ZenUtils.Utils import unused
+from Products.ZenUtils.observable import ObservableMixin
+from Products.ZenEvents.ZenEventClasses import Clear, Error
+from Products.ZenRRD.CommandParser import ParsedResults
 
 from Products.ZenCollector.daemon import CollectorDaemon
 from Products.ZenCollector.interfaces import ICollectorPreferences,\
@@ -40,26 +44,24 @@ from Products.ZenCollector.interfaces import ICollectorPreferences,\
 from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         SimpleTaskSplitter,\
                                         TaskStates
-from Products.ZenEvents.ZenEventClasses import Error, Clear
-from Products.ZenUtils.observable import ObservableMixin
-from SQLClient import SQLClient
+from ZenPacks.community.SQLDataSource.SQLClient import adbapiExecutor
+try:
+    from Products.ZenCollector.pools import getPool
+except:
+    from ZenPacks.community.SQLDataSource.SQLClient import getPool
+from Products.ZenEvents import Event
+
+from Products.DataCollector import Plugins
+unused(Plugins)
 
 # We retrieve our configuration data remotely via a Twisted PerspectiveBroker
 # connection. To do so, we need to import the class that will be used by the
 # configuration service to send the data over, i.e. DeviceProxy.
-from Products.ZenUtils.Utils import unused
 from Products.ZenCollector.services.config import DeviceProxy
 unused(DeviceProxy)
-unused(Globals)
 
-try:
-    from Products.ZenCollector.pools import getPool
-except:
-    from SQLClient import getPool
-#
-# creating a logging context for this module to use
-#
-log = logging.getLogger("zen.zenperfsql")
+COLLECTOR_NAME = "zenperfsql"
+POOL_NAME = 'SqlConfigs'
 
 #
 # RPN reverse calculation
@@ -72,6 +74,7 @@ OPERATORS = {
     '/': operator.mul,
     '*': operator.truediv,
 }
+
 
 def rrpn(expression, value):
     oper = None
@@ -92,6 +95,105 @@ def rrpn(expression, value):
         return val//1
     except:
         return value
+
+
+class SqlPerformanceCollectionPreferences(object):
+    zope.interface.implements(ICollectorPreferences)
+
+    def __init__(self):
+        """
+        Constructs a new SqlPerformanceCollectionPreferences instance and 
+        provides default values for needed attributes.
+        """
+        self.collectorName = COLLECTOR_NAME
+        self.defaultRRDCreateCommand = None
+        self.configCycleInterval = 20 # minutes
+        self.cycleInterval = 5 * 60 # seconds
+
+        # The configurationService attribute is the fully qualified class-name
+        # of our configuration service that runs within ZenHub
+        self.configurationService = 'ZenPacks.community.SQLDataSource.services.SqlPerformanceConfig'
+
+        # Provide a reasonable default for the max number of tasks
+        self.maxTasks = 1
+
+        # Will be filled in based on buildOptions
+        self.options = None
+
+    def buildOptions(self, parser):
+        parser.add_option('--showconnectionstring',
+                          dest='showconnectionstring',
+                          action="store_true",
+                          default=False,
+                          help="Display the entire connection string, " \
+                               " including any passwords.")
+
+    def postStartup(self):
+        pass
+
+
+class DataPointConfig(pb.Copyable, pb.RemoteCopy):
+    id = ''
+    component = ''
+    alias = ''
+    expr = ''
+    rrdPath = ''
+    rrdType = None
+    rrdCreateCommand = ''
+    rrdMin = None
+    rrdMax = None
+
+    def __repr__(self):
+        return ':'.join((self.id, self.alias))
+
+pb.setUnjellyableForClass(DataPointConfig, DataPointConfig)
+
+
+class DataSourceConfig(pb.Copyable, pb.RemoteCopy):
+    """
+    Holds the config of every query to be run
+    """
+    device = ''
+    sql = ''
+    sqlp = ''
+    connectionString = ''
+    keybindings = None
+    ds = ''
+    cycleTime = None
+    eventClass = None
+    eventKey = None
+    severity = 3
+    lastStart = 0
+    lastStop = 0
+    result = None
+
+    def __init__(self):
+        self.points = []
+
+    @property
+    def columns(self):
+        return [dp.alias for dp in self.points]
+
+    def getEventKey(self, point):
+        # fetch datapoint name from filename path and add it to the event key
+        return self.eventKey + '|' + point.rrdPath.split('/')[-1]
+
+    def queryKey(self):
+        "Provide a value that establishes the uniqueness of this query"
+        return '%'.join(map(str,[self.cycleTime, self.severity,
+                                self.connectionString, self.sql]))
+    def __str__(self):
+        return ' '.join(map(str, [
+                        self.ds,
+                        self.cycleTime, 
+                       ]))
+
+pb.setUnjellyableForClass(DataSourceConfig, DataSourceConfig)
+
+
+STATUS_EVENT = {'eventClass' : '/Status/PyDBAPI',
+                'component' : 'zenperfsql',
+}
 
 
 class SubConfigurationTaskSplitter(SimpleTaskSplitter):
@@ -150,240 +252,355 @@ class SubConfigurationTaskSplitter(SimpleTaskSplitter):
                                             configCopy)
         return tasks
 
-class ZenPerfSqlTaskSplitter(SubConfigurationTaskSplitter):
-    """
-    A task splitter that creates a single scheduled task by
-    device, cycletime and other criteria.
-    """
-    subconfigName = 'datapoints'
+
+class SqlPerCycletimeTaskSplitter(SubConfigurationTaskSplitter):
+    subconfigName = 'datasources'
 
     def makeConfigKey(self, config, subconfig):
-        return (config.id, config.configCycleInterval,
-                md5.new(' '.join(subconfig[0])).hexdigest())
-#                ' '.join(subconfig[0]))
+        return (config.id,subconfig.cycleTime,hash(subconfig.connectionString))
 
 
-# Create an implementation of the ICollectorPreferences interface so that the
-# ZenCollector framework can configure itself from our preferences.
-class ZenPerfSqlPreferences(object):
-    zope.interface.implements(ICollectorPreferences)
-
-    def __init__(self):
-        """
-        Construct a new ZenPerfSqlPreferences instance and provide default
-        values for needed attributes.
-        """
-        self.collectorName = "zenperfsql"
-        self.defaultRRDCreateCommand = None
-        self.cycleInterval = 5 * 60 # seconds
-        self.configCycleInterval = 20 # minutes
-        self.options = None
-        self.maxTasks = 1
-
-        # the configurationService attribute is the fully qualified class-name
-        # of our configuration service that runs within ZenHub
-        self.configurationService = 'ZenPacks.community.SQLDataSource.services.SqlPerfConfig'
-
-    def buildOptions(self, parser):
-        parser.add_option('--debug', dest='debug', default=False,
-                               action='store_true',
-                               help='Increase logging verbosity.')
-
-
-    def postStartup(self):
-        # turn on debug logging if requested
-        logseverity = self.options.logseverity
-
-
-class ZenPerfSqlTask(ObservableMixin):
+class SqlPerformanceCollectionTask(ObservableMixin):
+    """
+    A task that performs periodic performance collection.
+    """
     zope.interface.implements(IScheduledTask)
 
-    STATE_SQLC_CONNECT = 'SQLC_CONNECT'
-    STATE_SQLC_QUERY = 'SQLC_QUERY'
-    STATE_SQLC_PROCESS = 'SQLC_PROCESS'
+    STATE_CONNECTING = 'CONNECTING'
+    STATE_FETCH_DATA = 'FETCH_DATA'
+    STATE_PARSE_DATA = 'PARSING_DATA'
+    STATE_STORE_PERF = 'STORE_PERF_DATA'
 
     def __init__(self,
                  taskName,
-                 deviceId,
+                 configId,
                  scheduleIntervalSeconds,
                  taskConfig):
         """
-        Construct a new task instance to get SQL data.
-
-        @param deviceId: the Zenoss deviceId to watch
-        @type deviceId: string
         @param taskName: the unique identifier for this task
         @type taskName: string
+        @param configId: configuration to watch
+        @type configId: string
         @param scheduleIntervalSeconds: the interval at which this task will be
                collected
         @type scheduleIntervalSeconds: int
         @param taskConfig: the configuration for this task
         """
-        super(ZenPerfSqlTask, self).__init__()
+        super(SqlPerformanceCollectionTask, self).__init__()
 
+        # Needed for interface
         self.name = taskName
-        self.configId = deviceId
-        self.interval = scheduleIntervalSeconds
+        self.configId = configId
         self.state = TaskStates.STATE_IDLE
+        self.interval = scheduleIntervalSeconds
 
-        self._taskConfig = taskConfig
-        self._devId = deviceId
-        self._manageIp = self._taskConfig.manageIp
-        self._datapoints = self._taskConfig.datapoints
-        self._thresholds = self._taskConfig.thresholds
+        # The taskConfig corresponds to a DeviceProxy
+        self._device = taskConfig
+
+        self._devId = self._device.id
+        self._manageIp = self._device.manageIp
 
         self._dataService = zope.component.queryUtility(IDataService)
         self._eventService = zope.component.queryUtility(IEventService)
+
         self._preferences = zope.component.queryUtility(ICollectorPreferences,
-                                                        "zenperfsql")
-        self._connectionString = taskConfig.datapoints[0][0]
-        self._sqlc = None
-        self._pool = getPool('adbapi executors')
+                                                        COLLECTOR_NAME)
+        self._lastErrorMsg = ''
 
-    def _failure(self, result, comp=None):
+        self._executor = None
+
+        self._datasources = taskConfig.datasources
+        self._dbapiName = taskConfig.datasources[0].connectionString.split(',',
+                                                        1)[0].strip('\'"')
+        self.pool = getPool('adbapi executors')
+        self.executed = 0
+
+    def __str__(self):
+        return "SQL schedule Name: %s configId: %s Datasources: %d" % (
+               self.name, self.configId, len(self._datasources))
+
+    def cleanup(self):
+        self._cleanUpPool()
+        self._close()
+
+    def _getPoolKey(self):
         """
-        Errback for an unsuccessful asynchronous connection or collection 
-        request.
+        Get the key under which the client should be stored in the pool.
         """
-        err = result.getErrorMessage()
-        log.error("Device %s: %s", self._devId, err)
-        collectorName = self._preferences.collectorName
-        summary = "Could not fetch data"
+        return self._dbapiName
 
-        self._eventService.sendEvent(dict(
-            summary=summary,
-            message=summary + " (%s)"%err,
-            component=comp or collectorName,
-            eventClass='/Status/PyDBAPI',
-            device=self._devId,
-            severity=Error,
-            agent=collectorName,
-            ))
+    def _cleanUpPool(self):
+        """
+        Close the connection currently associated with this task.
+        """
+        poolkey = self._getPoolKey()
+        if poolkey in self.pool and self.pool[poolkey]._running < 1:
+            self.pool[poolkey] = None
+            del self.pool[poolkey]
 
-        self._cleanup()
-        # give the result to the rest of the errback chain
+    def doTask(self):
+        """
+        Contact to one device and return a deferred which gathers data from
+        the device.
+
+        @return: Deferred actions to run against a device configuration
+        @rtype: Twisted deferred object
+        """
+        # See if we need to connect first before doing any collection
+        d = defer.maybeDeferred(self._connect)
+        d.addCallbacks(self._connectCallback, self._failure)
+        d.addCallback(self._fetchPerf)
+
+        # Call _finished for both success and error scenarios
+        d.addBoth(self._finished)
+
+        # Wait until the Deferred actually completes
+        return d
+
+    def _connect(self):
+        """
+        check if executor for specific dbapi in pool if not create a executor.
+        """
+
+        executor = self.pool.get(self._getPoolKey(), None)
+        if executor is None:
+            self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
+            log.debug("Creating %s executor object", self._getPoolKey())
+            executor = adbapiExecutor()
+        self._executor = executor
+        return executor
+
+    def _close(self):
+        """
+        If a local datasource executor, do nothing.
+
+        If an SSH datasource executor, relinquish a connection to the remote device.
+        """
+        if self._executor and self._executor._running < 1:
+            self._executor =  None
+            poolkey = self._getPoolKey()
+            if poolkey in self.pool:
+                self.pool[poolkey] = None
+                del self.pool[poolkey]
+
+    def _failure(self, reason):
+        """
+        Twisted errBack to log the exception for a single device.
+
+        @parameter reason: explanation of the failure
+        @type reason: Twisted error instance
+        """
+        msg = reason.getErrorMessage()
+        if not msg: # Sometimes we get blank error messages
+            msg = reason.__class__
+        msg = '%s %s' % (self._devId, msg)
+
+        if self._lastErrorMsg != msg:
+            self._lastErrorMsg = msg
+            if msg:
+                log.error(msg)
+
+        if reason:
+            self._eventService.sendEvent(STATUS_EVENT,
+                                     device=self._devId,
+                                     summary=msg,
+                                     severity=Event.Error)
+        return reason
+
+    def _connectCallback(self, result):
+        """
+        Callback called after a successful connect to the remote device.
+        """
+        log.debug("Connected to %s [%s]", self._devId, self._manageIp)
         return result
 
-    def _sendEvents(self, components):
+    def _fetchPerf(self, ignored):
         """
-        Sent Error and Clear events 
-        """
-        events = []
-        errors = []
-        for (comp, metaType), severity in components.iteritems():
-            event = dict(
-                summary = "Could not fetch data",
-                message = "Could not fetch data",
-                eventClass = '/Status/%s' % metaType,
-                device = self._devId,
-                severity = severity,
-                agent = self._preferences.collectorName,
-                )
-            if comp: event['component'] = comp
-            else: event['eventClass'] = '/Status/PyDBAPI'
-            if isinstance(severity, Failure):
-                event['message'] = severity.getErrorMessage()
-                event['severity'] = Error
-                errors.append(event)
-            else:
-                events.append(event)
-        if len(errors) == len(components) > 0:
-            event = errors[0]
-            if 'component' in event:
-                del event['component']
-            event['eventClass'] = '/Status/PyDBAPI'
-            events.append(event)
-        else:
-            events.extend(errors)
-        for event in events:
-            if event['eventClass'] == '/Status/': continue
-            self._eventService.sendEvent(event)
+        Get performance data for all the monitored components on a device
 
-    def _collectSuccessful(self, results={}):
+        @parameter ignored: required to keep Twisted's callback chain happy
+        @type ignored: result of previous callback
         """
-        Callback for a successful fetch of services from the remote device.
+        self.state = SqlPerformanceCollectionTask.STATE_FETCH_DATA
+
+        # Bundle up the list of tasks
+        deferredCmds = []
+        for datasource in self._datasources:
+            log.debug("Datasource %s %squery:'%s'", datasource.name,
+                self._preferences.options.showconnectionstring and \
+                "connection string: '%s', " % datasource.connectionString or "",
+                datasource.sql)
+            datasource.deviceConfig = self._device
+            task = self._executor.submit(datasource.connectionString,
+                                        datasource.sqlp,
+                                        datasource.sql,
+                                        datasource.columns,
+                                        datasource.keybindings)
+            task.addCallback(self._processDatasourceResults, datasource)
+            task.addErrback(self._processDatasourceErrors, datasource)
+            deferredCmds.append(task)
+
+        # Run the tasks
+        dl = defer.DeferredList(deferredCmds, consumeErrors=True)
+        dl.addCallback(self._parseResults)
+        dl.addCallback(self._storeResults)
+        dl.addCallback(self._updateStatus)
+        return dl
+
+    def _processDatasourceResults(self, results, datasource):
         """
-        self.state = ZenPerfSqlTask.STATE_SQLC_PROCESS
-        self._sqlc = None
+        Process a single datasource's result
 
-        log.debug("Successful collection from %s [%s], results=%s",
-                  self._devId, self._manageIp, results)
-        if not results: return None
-
-        compstatus = {}
-        for cs,tn,dpname,alias,comp,expr,rrdP,rrdT,rrdC,mm in self._datapoints:
+        @parameter results: results rows
+        @type results: list
+        @parameter datasource: datasource containg information
+        @type datasource: DataSourceConfig object
+        """
+        result = ParsedResults()
+        msg = 'Datasource %s query completed successfully' % (datasource.name)
+        ev = self._makeQueryEvent(datasource, msg, Clear)
+        result.events.append(ev)
+        for dp in datasource.points:
             values = []
-            compstatus[comp] = Clear
-            tresults = results.get(tn, [])
-            if isinstance(tresults, Failure):
-                compstatus[comp] = tresults
-                tresults = []
-            for d in tresults:
-                if len(d) == 0: continue
-                dpvalue = d.get(alias, None)
-                if dpvalue == None or dpvalue == '': continue
-                elif type(dpvalue) is list: dpvalue = dpvalue[0]
+            for row in results:
+                dpvalue = row.get(dp.alias, None)
+                if dpvalue == None or dpvalue == '':
+                    continue
+                elif type(dpvalue) is list:
+                    dpvalue = dpvalue[0]
                 elif isinstance(dpvalue, datetime):
                     dpvalue = time.mktime(dpvalue.timetuple())
-                if expr:
-                    if expr.__contains__(':'):
-                        for vmap in expr.split(','):
+                if dp.expr:
+                    if dp.expr.__contains__(':'):
+                        for vmap in dp.expr.split(','):
                             var, val = vmap.split(':')
                             if var.strip('"') != dpvalue: continue
                             dpvalue = int(val)
                             break
                     else:
-                        dpvalue = rrpn(expr, dpvalue)
+                        dpvalue = rrpn(dp.expr, dpvalue)
                 values.append(dpvalue)
-            if dpname.endswith('_count'): value = len(values)
-            elif not values: continue
+            if dp.id.endswith('_count'): value = len(values)
+            elif not values: value = None
             elif len(values) == 1: value = values[0]
-            elif dpname.endswith('_avg'):value = sum(values) / len(values)
-            elif dpname.endswith('_sum'): value = sum(values)
-            elif dpname.endswith('_max'): value = max(values)
-            elif dpname.endswith('_min'): value = min(values)
-            elif dpname.endswith('_first'): value = values[0]
-            elif dpname.endswith('_last'): value = values[-1]
+            elif dp.id.endswith('_avg'):value = sum(values) / len(values)
+            elif dp.id.endswith('_sum'): value = sum(values)
+            elif dp.id.endswith('_max'): value = max(values)
+            elif dp.id.endswith('_min'): value = min(values)
+            elif dp.id.endswith('_first'): value = values[0]
+            elif dp.id.endswith('_last'): value = values[-1]
             else: value = sum(values) / len(values)
-            try: self._dataService.writeRRD(rrdP,
-                                            float(value),
-                                            rrdT,
-                                            rrdC,
-                                            min=mm[0],
-                                            max=mm[1])
-            except Exception, e:
-                compstatus[comp] = Failure(e)
-        self._sendEvents(compstatus)
-        compstatus.clear()
-        self._cleanup()
-        return results
+            result.values.append((dp, value))
+        return datasource, result
 
-    def cleanup(self):
-        self._cleanup()
+    def _processDatasourceErrors(self, results, datasource):
+        """
+        Process a single datasource's Error
 
-    def _cleanup(self):
-        self._sqlc = None
+        @parameter result: deferred Failure
+        @type result: Failure object
+        @parameter datasource: datasource containg information
+        @type datasource: DataSourceConfig object
+        """
+        result = ParsedResults()
+        msg = results.getErrorMessage()
+        results.cleanFailure()
+        ev = self._makeQueryEvent(datasource, msg)
+        if ev['severity'] not in ('Clear', 'Info', 'Debug'):
+            ev['stderr'] = msg
+        result.events.append(ev)
+        return datasource, result
 
-    def doTask(self):
-        log.debug("Polling for SQL data from %s [%s]", 
-                                                    self._devId, self._manageIp)
-        self.state = ZenPerfSqlTask.STATE_SQLC_QUERY
-        queries = self._taskConfig.queries[self._connectionString].copy()
-        self._sqlc = SQLClient(self._taskConfig)
-        d = self._sqlc.query(queries, sync=False, plugin='zenperfsql')
-        d.addCallback(self._collectSuccessful)
-        d.addErrback(self._failure)
-        # returning a Deferred will keep the framework from assuming the task
-        # is done until the Deferred actually completes
-        return d
+    def _parseResults(self, resultList):
+        """
+        Interpret the results retrieved from the commands and pass on
+        the datapoint values and events.
+
+        @parameter resultList: results of running the commands in a DeferredList
+        @type resultList: array of (boolean, (datasource, result))
+        """
+        self.state = SqlPerformanceCollectionTask.STATE_PARSE_DATA
+        parseableResults = []
+        for success, results in resultList:
+            parseableResults.append(results)
+        return parseableResults
+
+    def _storeResults(self, resultList):
+        """
+        Store the values in RRD files
+
+        @parameter resultList: results of running the commands
+        @type resultList: array of (datasource, dictionary)
+        """
+        self.state = SqlPerformanceCollectionTask.STATE_STORE_PERF
+        for datasource, results in resultList:
+            for dp, value in results.values:
+                threshData = {
+                    'eventKey': datasource.getEventKey(dp),
+                    'component': dp.component,
+                }
+                self._dataService.writeRRD(
+                                  dp.rrdPath,
+                                  value,
+                                  dp.rrdType,
+                                  dp.rrdCreateCommand,
+                                  datasource.cycleTime,
+                                  dp.rrdMin,
+                                  dp.rrdMax)
+#                                  threshData)
+
+        return resultList
+
+    def _updateStatus(self, resultList):
+        """
+        Send any accumulated events
+
+        @parameter resultList: results of running the commands
+        @type resultList: array of (datasource, dictionary)
+        """
+        for datasource, results in resultList:
+            for ev in results.events:
+                self._eventService.sendEvent(ev, device=self._devId)
+        return resultList
+
+    def _makeQueryEvent(self, datasource, msg, severity=None):
+        """
+        Create an event using the info in the DataSourceConfig object.
+        """
+        severity =  severity is None and datasource.severity or severity
+        ev = dict(
+                  device=self._devId,
+                  component=datasource.component,
+                  eventClass=datasource.eventClass,
+                  eventKey=datasource.eventKey,
+                  severity=severity,
+                  summary=msg
+        )
+        return ev
+
+    def _finished(self, result):
+        """
+        Callback activated when the task is complete
+
+        @parameter result: results of the task
+        @type result: deferred object
+        """
+        try:
+            self._close()
+        except Exception, ex:
+            log.warn("Failed to close device %s: error %s" %
+                     (self._devId, str(ex)))
+
+        # Return the result so the framework can track success/failure
+        return result
 
     def displayStatistics(self):
         """
         Called by the collector framework scheduler, and allows us to
         see how each task is doing.
         """
-        display = "SQL Pools: %s\n"%len(self._pool)
-        for n, p in self._pool.iteritems():
+        display = "Active SQL Pools: %s\n"%len(self.pool)
+        for n, p in self.pool.iteritems():
             display += '%s\n'%n
             if 0 < log.getEffectiveLevel() < 11:
                 if p._cs:
@@ -397,13 +614,15 @@ class ZenPerfSqlTask(ObservableMixin):
                 display += '\t\t%s\n'%t._sql
         return display
 
-#
-# Collector Daemon Main entry point
-#
+
 if __name__ == '__main__':
-    myPreferences = ZenPerfSqlPreferences()
-    myTaskFactory = SimpleTaskFactory(ZenPerfSqlTask)
-    myTaskSplitter = ZenPerfSqlTaskSplitter(myTaskFactory)
+    # Required for passing classes from zenhub to here
+    from ZenPacks.community.SQLDataSource.zenperfsql import DataSourceConfig,\
+                                                            DataPointConfig
+
+    myPreferences = SqlPerformanceCollectionPreferences()
+    myTaskFactory = SimpleTaskFactory(SqlPerformanceCollectionTask)
+    myTaskSplitter = SqlPerCycletimeTaskSplitter(myTaskFactory)
     daemon = CollectorDaemon(myPreferences, myTaskSplitter)
     daemon.run()
 
