@@ -121,7 +121,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
     def getConnectionString(self, context):
         connectionString = self.getCommand(context, self.cs)
         if '${' in connectionString:
-            connectionString = self.getCommand(context, self.cs)
+            connectionString = self.getCommand(context, connectionString)
         return connectionString
 
 
