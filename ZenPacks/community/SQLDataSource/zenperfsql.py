@@ -12,12 +12,12 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.0 2012/03/28 23:08:25 egor Exp $"""
+$Id: zenperfsql.py,v 3.1 2012/03/30 19:53:57 egor Exp $"""
 
-__version__ = "$Revision: 3.0 $"[11:-2]
+__version__ = "$Revision: 3.1 $"[11:-2]
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 log = logging.getLogger("zen.zenperfsql")
 from copy import copy
@@ -25,11 +25,10 @@ from copy import copy
 from twisted.internet import reactor, defer, error
 from twisted.python.failure import Failure
 
-from twisted.spread import pb
-
 import Globals
 import zope.interface
 
+from Products.ZenModel.ZVersion import VERSION as ZVERSION
 from Products.ZenUtils.Utils import unused
 from Products.ZenUtils.observable import ObservableMixin
 from Products.ZenEvents.ZenEventClasses import Clear, Error
@@ -44,7 +43,9 @@ from Products.ZenCollector.interfaces import ICollectorPreferences,\
 from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         SimpleTaskSplitter,\
                                         TaskStates
-from ZenPacks.community.SQLDataSource.SQLClient import adbapiExecutor
+from ZenPacks.community.SQLDataSource.SQLClient import  adbapiExecutor, \
+                                                        DataSourceConfig,\
+                                                        DataPointConfig
 try:
     from Products.ZenCollector.pools import getPool
 except:
@@ -130,65 +131,6 @@ class SqlPerformanceCollectionPreferences(object):
 
     def postStartup(self):
         pass
-
-
-class DataPointConfig(pb.Copyable, pb.RemoteCopy):
-    id = ''
-    component = ''
-    alias = ''
-    expr = ''
-    rrdPath = ''
-    rrdType = None
-    rrdCreateCommand = ''
-    rrdMin = None
-    rrdMax = None
-
-    def __repr__(self):
-        return ':'.join((self.id, self.alias))
-
-pb.setUnjellyableForClass(DataPointConfig, DataPointConfig)
-
-
-class DataSourceConfig(pb.Copyable, pb.RemoteCopy):
-    """
-    Holds the config of every query to be run
-    """
-    device = ''
-    sql = ''
-    sqlp = ''
-    connectionString = ''
-    keybindings = None
-    ds = ''
-    cycleTime = None
-    eventClass = None
-    eventKey = None
-    severity = 3
-    lastStart = 0
-    lastStop = 0
-    result = None
-
-    def __init__(self):
-        self.points = []
-
-    @property
-    def columns(self):
-        return [dp.alias for dp in self.points]
-
-    def getEventKey(self, point):
-        # fetch datapoint name from filename path and add it to the event key
-        return self.eventKey + '|' + point.rrdPath.split('/')[-1]
-
-    def queryKey(self):
-        "Provide a value that establishes the uniqueness of this query"
-        return '%'.join(map(str,[self.cycleTime, self.severity,
-                                self.connectionString, self.sql]))
-    def __str__(self):
-        return ' '.join(map(str, [
-                        self.ds,
-                        self.cycleTime, 
-                       ]))
-
-pb.setUnjellyableForClass(DataSourceConfig, DataSourceConfig)
 
 
 STATUS_EVENT = {'eventClass' : '/Status/PyDBAPI',
@@ -431,13 +373,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                 "connection string: '%s', " % datasource.connectionString or "",
                 datasource.sql)
             datasource.deviceConfig = self._device
-            task = self._executor.submit(datasource.connectionString,
-                                        datasource.sqlp,
-                                        datasource.sql,
-                                        datasource.columns,
-                                        datasource.keybindings)
-            task.addCallback(self._processDatasourceResults, datasource)
-            task.addErrback(self._processDatasourceErrors, datasource)
+            task = self._executor.submit(datasource)
+            task.addBoth(self._processDatasourceResults)
             deferredCmds.append(task)
 
         # Run the tasks
@@ -447,22 +384,29 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         dl.addCallback(self._updateStatus)
         return dl
 
-    def _processDatasourceResults(self, results, datasource):
+    def _processDatasourceResults(self, datasource):
         """
         Process a single datasource's result
 
-        @parameter results: results rows
-        @type results: list
-        @parameter datasource: datasource containg information
+        @parameter datasource: results rows
         @type datasource: DataSourceConfig object
         """
         result = ParsedResults()
+        if isinstance(datasource.result, Failure):
+            msg = datasource.result.getErrorMessage()
+            datasource.result.cleanFailure()
+            datasource.result = None
+            ev = self._makeQueryEvent(datasource, msg)
+            if ev['severity'] not in ('Clear', 'Info', 'Debug'):
+                ev['stderr'] = msg
+            result.events.append(ev)
+            return datasource, result
         msg = 'Datasource %s query completed successfully' % (datasource.name)
         ev = self._makeQueryEvent(datasource, msg, Clear)
         result.events.append(ev)
         for dp in datasource.points:
             values = []
-            for row in results:
+            for row in datasource.result:
                 dpvalue = row.get(dp.alias, None)
                 if dpvalue == None or dpvalue == '':
                     continue
@@ -470,6 +414,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                     dpvalue = dpvalue[0]
                 elif isinstance(dpvalue, datetime):
                     dpvalue = time.mktime(dpvalue.timetuple())
+                elif isinstance(dpvalue, timedelta):
+                    dpvalue = dpvalue.seconds
                 if dp.expr:
                     if dp.expr.__contains__(':'):
                         for vmap in dp.expr.split(','):
@@ -491,25 +437,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             elif dp.id.endswith('_last'): value = values[-1]
             else: value = sum(values) / len(values)
             result.values.append((dp, value))
+        datasource.result = None
         return datasource, result
 
-    def _processDatasourceErrors(self, results, datasource):
-        """
-        Process a single datasource's Error
-
-        @parameter result: deferred Failure
-        @type result: Failure object
-        @parameter datasource: datasource containg information
-        @type datasource: DataSourceConfig object
-        """
-        result = ParsedResults()
-        msg = results.getErrorMessage()
-        results.cleanFailure()
-        ev = self._makeQueryEvent(datasource, msg)
-        if ev['severity'] not in ('Clear', 'Info', 'Debug'):
-            ev['stderr'] = msg
-        result.events.append(ev)
-        return datasource, result
 
     def _parseResults(self, resultList):
         """
@@ -535,19 +465,20 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self.state = SqlPerformanceCollectionTask.STATE_STORE_PERF
         for datasource, results in resultList:
             for dp, value in results.values:
-                threshData = {
-                    'eventKey': datasource.getEventKey(dp),
-                    'component': dp.component,
-                }
-                self._dataService.writeRRD(
-                                  dp.rrdPath,
-                                  value,
-                                  dp.rrdType,
-                                  dp.rrdCreateCommand,
-                                  datasource.cycleTime,
-                                  dp.rrdMin,
-                                  dp.rrdMax)
-#                                  threshData)
+                args = [dp.rrdPath,
+                        value,
+                        dp.rrdType,
+                        dp.rrdCreateCommand,
+                        datasource.cycleTime,
+                        dp.rrdMin,
+                        dp.rrdMax]
+                if int(ZVERSION[0]) > 2:
+                    threshData = {
+                        'eventKey': datasource.getEventKey(dp),
+                        'component': dp.component,
+                        }
+                    args.append(threshData)
+                self._dataService.writeRRD(*args)
 
         return resultList
 
@@ -617,7 +548,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
 
 if __name__ == '__main__':
     # Required for passing classes from zenhub to here
-    from ZenPacks.community.SQLDataSource.zenperfsql import DataSourceConfig,\
+    from ZenPacks.community.SQLDataSource.SQLClient import DataSourceConfig,\
                                                             DataPointConfig
 
     myPreferences = SqlPerformanceCollectionPreferences()

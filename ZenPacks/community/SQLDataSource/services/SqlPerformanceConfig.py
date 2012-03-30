@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.00 2012/03/28 23:10:34 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.1 2012/03/30 21:56:07 egor Exp $"""
 
-__version__ = "$Revision: 3.00 $"[11:-2]
+__version__ = "$Revision: 3.1 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -28,7 +28,7 @@ from ZODB.POSException import ConflictError
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
-from ZenPacks.community.SQLDataSource.zenperfsql import DataSourceConfig,\
+from ZenPacks.community.SQLDataSource.SQLClient import DataSourceConfig,\
                                                         DataPointConfig
 from ZenPacks.community.SQLDataSource.datasources.SQLDataSource \
     import SQLDataSource as DataSource
@@ -107,6 +107,12 @@ class SqlPerformanceConfig(CollectorConfigService):
             self._sendQueryEvent(device.id, details)
 
     def _getComponentConfig(self, comp, device, perfServer, queries):
+        if comp.__class__.__name__ in self.evtOrgNames:
+            eventClass = comp.__class__.__name__
+        elif comp.meta_type in self.evtOrgNames:
+            eventClass = comp.meta_type
+        else:
+            eventClass = 'PyDBAPI'
         for templ in comp.getRRDTemplates():
             for ds in templ.getRRDDataSources():
                 if not (isinstance(ds, DataSource) and ds.enabled): continue
@@ -121,12 +127,6 @@ class SqlPerformanceConfig(CollectorConfigService):
                 if ds.eventClass:
                     query.eventClass = ds.eventClass
                 else:
-                    if comp.__class__.__name__ in self.evtOrgNames:
-                        eventClass = comp.__class__.__name__
-                    elif comp.meta_type in self.evtOrgNames:
-                        eventClass = comp.meta_type
-                    else:
-                        eventClass = 'PyDBAPI'
                     query.eventClass = '/Status/%s'%eventClass
                 try:
                     query.sql, query.sqlp, query.keybindings, \
