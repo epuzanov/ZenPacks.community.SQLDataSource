@@ -12,13 +12,14 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 2.13 2012/03/24 0:04:39 egor Exp $"""
+$Id: SQLPlugin.py,v 3.0 2012/03/31 0:02:06 egor Exp $"""
 
-__version__ = "$Revision: 2.13 $"[11:-2]
+__version__ = "$Revision: 3.0 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
+from Products.ZenUtils.ZenTales import talesEvalStr
 from string import lower
-from SQLClient import SQLClient
+from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
 
 class SQLPlugin(CollectorPlugin):
     """
@@ -28,25 +29,17 @@ class SQLPlugin(CollectorPlugin):
     transport = "python"
     tables = {}
     cspropname = "zConnectionString"
-    csProperties = (
-        ('host', 'manageIp', 'localhost'),
-        ('user', 'zWinUser', ''),
-        ('password', 'zWinPassword', ''),
-        )
     deviceProperties = CollectorPlugin.deviceProperties  +  ('zWinUser',
                                                             'zWinPassword',
                                                             )
 
     def prepareCS(self, device):
-        args = [getattr(device, self.cspropname, '') or \
-                                "'pywbemdb',scheme='https',host='localhost'"]
-        kwkeys = map(lower, eval('(lambda *arg,**kws:kws)(%s)'%args[0]).keys())
-        for csPropName, dPropName, defVal in self.csProperties:
-            if csPropName in kwkeys: continue
-            val = getattr(device, dPropName, defVal)
-            if isinstance(val, (str, unicode)): val = "'%s'"%val
-            args.append("=".join((csPropName, val)))
-        return ','.join(args)
+        connectionStrings = getattr(device, self.cspropname, '') or \
+            "'pywbemdb',scheme='https',host='${here/manageIp},user='${here/zWinUser}',password='${here/zWinPassword}'"
+        extra = {'dev':device}
+        if type(connectionStrings) is not list:
+            return talesEvalStr(connectionStrings, device, extra)
+        return [talesEvalStr(cs, device, extra) for cs in connectionStrings]
 
     def queries(self, device=None):
         return self.tables
