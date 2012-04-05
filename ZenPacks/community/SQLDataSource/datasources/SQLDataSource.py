@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.8 2012/03/31 0:05:27 egor Exp $"""
+$Id: SQLDataSource.py,v 2.9 2012/04/05 17:06:44 egor Exp $"""
 
-__version__ = "$Revision: 2.8 $"[11:-2]
+__version__ = "$Revision: 2.9 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -200,20 +200,21 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         try:
             sql, sqlp, kbs, cs = self.getQueryInfo(device)
             if not sql: raise StandardError('query is empty')
-            sql = sql.replace('$','\\$')
             properties = dict([(
                         dp.getAliasNames() and dp.getAliasNames()[0] or dp.id,
                         dp.id) for dp in self.getRRDDataPoints()])
             write('Executing query: "%s"'%sql)
             write('')
-            rows = cl.query({'t':(sql, {}, cs, properties)}).get('t', [{}])
+            rows = cl.query({'t':(sql, {}, cs, properties)})
+            if isinstance(rows, Failure):
+                raise StandardError(rows.getErrorMessage())
+            rows = rows.get('t', [{}])
             write('|'.join(rows[0].keys()))
             for row in rows:
                 write('|'.join(map(str, row.values())))
         except:
             write('exception while executing command')
             write('type: %s  value: %s' % tuple(sys.exc_info()[:2]))
-        cl.close()
         cl = None
         write('')
         write('')

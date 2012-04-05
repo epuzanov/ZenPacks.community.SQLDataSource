@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.1 2012/03/30 19:53:57 egor Exp $"""
+$Id: zenperfsql.py,v 3.2 2012/04/05 17:09:25 egor Exp $"""
 
-__version__ = "$Revision: 3.1 $"[11:-2]
+__version__ = "$Revision: 3.2 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -371,7 +371,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             log.debug("Datasource %s %squery:'%s'", datasource.name,
                 self._preferences.options.showconnectionstring and \
                 "connection string: '%s', " % datasource.connectionString or "",
-                datasource.sql)
+                datasource.sqlp)
             datasource.deviceConfig = self._device
             task = self._executor.submit(datasource)
             task.addBoth(self._processDatasourceResults)

@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.2 2012/03/20 19:51:03 egor Exp $"""
+$Id: SQLClient.py,v 3.3 2012/04/05 17:04:51 egor Exp $"""
 
-__version__ = "$Revision: 3.2 $"[11:-2]
+__version__ = "$Revision: 3.3 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -64,9 +64,15 @@ def parseConnectionString(cs='', options={}):
 
 def runQuery(txn, sql, columns, dbapi, timeout):
     def _timeout(txn):
-        if hasattr(txn._connection, 'cancel'):
-            txn._connection.cancel()
-        txn._cursor.close()
+        if isinstance(txn, dbapi.Transaction):
+            cursor = txn._cursor
+            connection = txn._connection
+        else:
+            cursor = txn
+            connection = getattr(cursor, 'connection', lambda:None)()
+        if hasattr(connection, 'cancel'):
+            connection.cancel()
+        cursor.close()
     def _convert(val, type):
         if val is None:
             if type == dbapi.STRING:
@@ -320,43 +326,40 @@ class SQLClient(BaseClient):
         self._pools = getPool('adbapi executors')
 
 
-    def query(self, queries, sync=True, plugin=''):
+    def query(self, queries):
         """
         Run SQL queries.
         """
-
-        def _finished(r):
-            results = {}
-            errors = 0
-            for success, (table, result) in r:
-                if isinstance(result, Failure):
-                    results[table] = []
-                    errors += 1
-                    result.cleanFailure()
-                else:
-                    results[table] = result
-            if errors and len(r) == errors:
-                results = Failure(result.getErrorMessage())
-            if sync:
-                self.results.append(('', results))
-                reactor.stop()
-            else:
-                return results
-        deferreds = []
+        results = {}
+        tasks = {}
         for table, task in queries.iteritems():
-            dsc = DataSourceConfig(*task)
-            dbapiName = dsc.connectionString.split(',', 1)[0].strip('\'"')
-            executor = self._pools.setdefault(dbapiName, adbapiExecutor())
-            deferred = executor.submit(dsc)
-            deferred.addBoth(self.parseResult, plugin, table, dbapiName)
-            deferreds.append(deferred)
-        dl = DeferredList(deferreds)
-        dl.addCallback(_finished)
-        if sync:
-            reactor.run()
-            return self.results.pop(0)[1]
-        else:
-            return dl
+            tasks.setdefault(task[2], []).append((table, task))
+        for cs, csTasks in tasks.iteritems():
+            args, kwargs = parseConnectionString(cs)
+            fl = []
+            if '.' in args[0]:
+                fl.append(args[0].split('.')[-1])
+            dbapi = __import__(args[0], globals(), locals(), fl)
+            connection = dbapi.connect(*args[1:], **kwargs)
+            for table, task in csTasks:
+                dsc = DataSourceConfig(*task)
+                cursor = connection.cursor()
+                try:
+                    dsc.result = runQuery(cursor, dsc.sql, dsc.columns, dbapi,
+                                        dsc.timeout)
+                    cursor.close()
+                except Exception, ex:
+                    if hasattr(connection, 'close'):
+                        connection.close()
+                    connection = None
+                    raise ex
+                cursor = None
+                t, result = self.parseResult(dsc, '', table, args[0])
+                results[table] = result
+            connection.close()
+            connection = None
+        return results
+
 
     def run(self):
         """
@@ -366,7 +369,7 @@ class SQLClient(BaseClient):
         for plugin in self.plugins:
             log.debug("Running collection for plugin %s", plugin.name())
             tasks = []
-            for table, task in plugin.prepareQueries().iteritems():
+            for table, task in plugin.prepareQueries(self.device).iteritems():
                 dsc = DataSourceConfig(*task)
                 dbapiName = dsc.connectionString.split(',', 1)[0].strip('\'"')
                 executor = self._pools.setdefault(dbapiName, adbapiExecutor())
@@ -425,15 +428,17 @@ class SQLClient(BaseClient):
 
         results = {}
         errors = 0
+        errmsg = ''
         for success, (table, result) in r:
             if isinstance(result, Failure):
                 results[table] = []
                 errors += 1
                 result.cleanFailure()
+                errmsg = result.getErrorMessage()
             else:
                 results[table] = result
         if len(r) == errors:
-            results = Failure(result.getErrorMessage())
+            results = Failure(errmsg)
         self.results.append((plugin, results))
 
 
@@ -539,9 +544,10 @@ if __name__ == "__main__":
         elif opt in ("-a", "--aliases"):
             aliases = arg.split()
     columns = dict(zip(columns, aliases))
+    queries = {'t': (query, {}, cs, columns)}
     cl = SQLClient(device=None)
     if 1:
-        sp = SQLPlugin({'t': (query, {}, cs, columns)})
+        sp = SQLPlugin(queries)
         cl.plugins.append(sp)
         cl.clientFinished=reactor.stop
         cl.run()
@@ -552,7 +558,7 @@ if __name__ == "__main__":
             results = {'t': Failure('ERROR:zen.SQLClient:No data received.')}
     else:
         try:
-            results = cl.query({'t':(query, {}, cs, columns)})
+            results = cl.query(queries)
         except Exception, e:
             results = {'t':Failure(e)}
     if isinstance(results, Failure):
