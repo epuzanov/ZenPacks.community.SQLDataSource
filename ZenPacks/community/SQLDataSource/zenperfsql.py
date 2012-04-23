@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.2 2012/04/05 17:09:25 egor Exp $"""
+$Id: zenperfsql.py,v 3.3 2012/04/23 16:15:45 egor Exp $"""
 
-__version__ = "$Revision: 3.2 $"[11:-2]
+__version__ = "$Revision: 3.3 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -304,11 +304,13 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         check if executor for specific dbapi in pool if not create a executor.
         """
 
-        executor = self.pool.get(self._getPoolKey(), None)
+        poolKey = self._getPoolKey()
+        executor = self.pool.get(poolKey, None)
         if executor is None:
             self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-            log.debug("Creating %s executor object", self._getPoolKey())
+            log.debug("Creating %s executor object", poolKey)
             executor = adbapiExecutor()
+            self.pool[poolKey] = executor
         self._executor = executor
         return executor
 
