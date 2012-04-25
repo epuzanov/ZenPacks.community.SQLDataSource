@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.3 2012/04/05 17:04:51 egor Exp $"""
+$Id: SQLClient.py,v 3.4 2012/04/25 19:47:55 egor Exp $"""
 
-__version__ = "$Revision: 3.3 $"[11:-2]
+__version__ = "$Revision: 3.4 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -80,7 +80,7 @@ def runQuery(txn, sql, columns, dbapi, timeout):
             if type == dbapi.NUMBER:
                 return 0
             return None
-        if type == dbapi.NUMBER:
+        if val and type == dbapi.NUMBER:
             return float(val)
         if type == dbapi.STRING:
             return str(val).strip()
@@ -150,18 +150,8 @@ class adbapiExecutor(object):
         submit a query to be executed. A deferred will be returned with the
         the result of the query.
 
-        @param cs: connection string
-        @type cs: string
-        @param name: tasks name (parsed sql query)
-        @type name: string
-        @param sql: sql query
-        @type sql: string
-        @param columns: columns to return
-        @type columns: dict
-        @param keybindings: filter
-        @type keybindings: dict
-        @param timeout: timeout in seconds
-        @type timeout: integer
+        @param task: task to be executed
+        @type task: DataSourceConfig
         """
         deferred = Deferred()
         deferred.addBoth(self._taskFinished, task)
@@ -266,7 +256,7 @@ class DataSourceConfig(pb.Copyable, pb.RemoteCopy):
     severity = 3
     lastStart = 0
     lastStop = 0
-    timeout = 20
+    timeout = 30
     result = None
 
     def __init__(self, sqlp='', kbs={}, cs='', columns={}, sql=''):

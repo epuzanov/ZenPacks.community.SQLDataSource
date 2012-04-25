@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.3 2012/04/23 16:15:45 egor Exp $"""
+$Id: zenperfsql.py,v 3.4 2012/04/25 19:49:27 egor Exp $"""
 
-__version__ = "$Revision: 3.3 $"[11:-2]
+__version__ = "$Revision: 3.4 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -467,6 +467,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self.state = SqlPerformanceCollectionTask.STATE_STORE_PERF
         for datasource, results in resultList:
             for dp, value in results.values:
+                if value in (None, ''):
+                    value = 0
                 args = [dp.rrdPath,
                         value,
                         dp.rrdType,
