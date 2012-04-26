@@ -63,6 +63,20 @@ def parseConnectionString(cs='', options={}):
     return args, kwargs
 
 def runQuery(txn, sql, columns, dbapi, timeout):
+    """
+    execute a sql query.
+
+    @param txn: database cursor
+    @type txn: dbapi.cursor or adbapi.Transaction
+    @param sql: sql operation
+    @type sql: string
+    @param columns: columns to return
+    @type columns: list
+    @param dbapi: dbapi module to use
+    @type dbapi: module
+    @param timeout: timeout in seconds
+    @type timeout: int
+    """
     def _timeout(txn):
         if isinstance(txn, dbapi.Transaction):
             cursor = txn._cursor
@@ -220,6 +234,9 @@ class adbapiExecutor(object):
         return task
 
 class DataPointConfig(pb.Copyable, pb.RemoteCopy):
+    """
+    Represents data point
+    """
     id = ''
     component = ''
     alias = ''
@@ -231,6 +248,14 @@ class DataPointConfig(pb.Copyable, pb.RemoteCopy):
     rrdMax = None
 
     def __init__(self, id='', alias=''):
+        """
+        Objects initialization
+
+        @param id: data points id
+        @type id: string
+        @param alias: column name
+        @type alias: string
+        """
         self.id = id
         self.alias = alias
 
@@ -260,10 +285,22 @@ class DataSourceConfig(pb.Copyable, pb.RemoteCopy):
     result = None
 
     def __init__(self, sqlp='', kbs={}, cs='', columns={}, sql=''):
+        """
+        Objects initialization
+
+        @param sqlp: prepared sql string
+        @type sqlp: string
+        @param kbs: keybindings
+        @type kbs: dictionary
+        @param cs: database connection string
+        @type cs: string
+        @param sqlp: original sql string
+        @type sqlp: string
+        """
         self.sqlp = sqlp
         self.keybindings = kbs
         self.connectionString = cs
-        self.points=[DataPointConfig(v,k.lower()) for k,v in columns.iteritems()]
+        self.points=[DataPointConfig(k,v.lower()) for k,v in columns.iteritems()]
         if not sql:
             self.sql = sqlp
 
@@ -319,6 +356,10 @@ class SQLClient(BaseClient):
     def query(self, queries):
         """
         Run SQL queries.
+
+        @param queries: queries dictionary, with table name as a key and task
+                        tuple as a value
+        @type queries: dictionary
         """
         results = {}
         tasks = {}
