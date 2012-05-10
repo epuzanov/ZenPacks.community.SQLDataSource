@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.9 2012/04/05 17:06:44 egor Exp $"""
+$Id: SQLDataSource.py,v 2.10 2012/05/10 19:21:50 egor Exp $"""
 
-__version__ = "$Revision: 2.9 $"[11:-2]
+__version__ = "$Revision: 2.10 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -200,9 +200,9 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         try:
             sql, sqlp, kbs, cs = self.getQueryInfo(device)
             if not sql: raise StandardError('query is empty')
-            properties = dict([(
-                        dp.getAliasNames() and dp.getAliasNames()[0] or dp.id,
-                        dp.id) for dp in self.getRRDDataPoints()])
+            properties = dict([(dp.id,
+                        dp.getAliasNames() and dp.getAliasNames()[0] or dp.id
+                        ) for dp in self.getRRDDataPoints()])
             write('Executing query: "%s"'%sql)
             write('')
             rows = cl.query({'t':(sql, {}, cs, properties)})
