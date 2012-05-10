@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.7'
+__version__ = '1.0.8'
 
 from string import upper, strip
 import threading
@@ -366,7 +366,7 @@ class isqlCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._timeout = 20
+        self._timeout = 60
         dsn = None
         uid = None
         pwd = None

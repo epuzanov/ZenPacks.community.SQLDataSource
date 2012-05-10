@@ -12,7 +12,7 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.4 2012/04/25 19:47:55 egor Exp $"""
+$Id: SQLClient.py,v 3.5 2012/05/10 20:43:07 egor Exp $"""
 
 __version__ = "$Revision: 3.4 $"[11:-2]
 
@@ -281,7 +281,7 @@ class DataSourceConfig(pb.Copyable, pb.RemoteCopy):
     severity = 3
     lastStart = 0
     lastStop = 0
-    timeout = 30
+    timeout = 180
     result = None
 
     def __init__(self, sqlp='', kbs={}, cs='', columns={}, sql=''):

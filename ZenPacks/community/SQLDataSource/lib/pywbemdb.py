@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.8'
+__version__ = '2.1.9'
 
 import socket
 from xml.sax import handler, make_parser
@@ -601,7 +601,7 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._timeout = float(kwargs.get('timeout', 10))
+        self._timeout = float(kwargs.get('timeout', 60))
         self._host = kwargs.get('host', 'localhost')
         self._scheme = kwargs.get('scheme', 'https')
         self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
