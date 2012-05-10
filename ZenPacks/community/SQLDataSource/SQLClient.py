@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.5 2012/05/10 20:43:07 egor Exp $"""
+$Id: SQLClient.py,v 3.6 2012/05/10 20:47:48 egor Exp $"""
 
-__version__ = "$Revision: 3.4 $"[11:-2]
+__version__ = "$Revision: 3.6 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -214,8 +214,8 @@ class adbapiExecutor(object):
             else: kc, kv = (), ''
             result = []
             for row in results:
-                if kv==''.join([(row.get(k) or '').strip() for k in kc]).lower():
-                    result.append(row)
+                if kv == ''.join([str(row.get(k) or '').strip() for k in kc]
+                    ).lower(): result.append(row)
             task.result.callback(result)
         if self._taskQueue:
             if nextTask > 0:
