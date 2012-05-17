@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.11 2012/05/16 23:22:05 egor Exp $"""
+$Id: SQLDataSource.py,v 2.12 2012/05/17 02:26:36 egor Exp $"""
 
-__version__ = "$Revision: 2.11 $"[11:-2]
+__version__ = "$Revision: 2.12 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -142,8 +142,6 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         @param Function write The output method we are using to stream the result of the command
         @parma Function errorLog The output method we are using to report errors
         """ 
-        from Products.ZenModel.Device import Device
-
         def writeLines(lines):
             for line in lines.splitlines():
                 write(line)
@@ -153,15 +151,15 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         device = None
         comp = None
         ttpc = getattr(self.rrdTemplate(), 'targetPythonClass', '')
+        ccn = ttpc.rsplit('.', 1)[-1]
         try:
-            ccm, ccn = ttpc.rsplit('.', 1)
             compClass = getattr(__import__(ttpc,globals(),locals(),[ccn]), ccn)
         except:
-            compClass = Device
+            from Products.ZenModel.Device import Device as compClass
         if testDevice:
             # Try to get specified device
             device = self.findDevice(testDevice)
-            if device and not isinstance(compClass, Device):
+            if not isinstance(device, (compClass, type(None))):
                 for comp in device.getMonitoredComponents():
                     if isinstance(comp, compClass): break
                 else:
@@ -169,7 +167,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         elif hasattr(self, 'device'):
             # ds defined on a device, use that device
             device = self.device()
-            if device and not isinstance(compClass, Device):
+            if not isinstance(device, (compClass, type(None))):
                 for comp in device.getMonitoredComponents():
                     if isinstance(comp, compClass): break
                 else:
@@ -177,7 +175,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         elif hasattr(self, 'getSubDevicesGen'):
             # ds defined on a device class, use any device from the class
             for device in self.getSubDevicesGen():
-                if isinstance(compClass, Device): break
+                if isinstance(device, compClass): break
                 for comp in device.getMonitoredComponents():
                     if isinstance(comp, compClass): break 
                 else:
@@ -185,6 +183,8 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
                 if comp: break
             else:
                 device = None
+        if not comp:
+            comp = device
         if not device:
             errorLog(
                 'No Testable Device',
