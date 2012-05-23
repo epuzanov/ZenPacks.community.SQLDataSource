@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.6 2012/05/10 20:47:48 egor Exp $"""
+$Id: SQLClient.py,v 3.7 2012/05/23 20:27:21 egor Exp $"""
 
-__version__ = "$Revision: 3.6 $"[11:-2]
+__version__ = "$Revision: 3.7 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -113,8 +113,9 @@ def runQuery(txn, sql, columns, dbapi, timeout):
             ex = TimeoutError('Query Timeout')
         raise ex
     t.cancel()
-    header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description or []])
-    if not header: return res
+    if not txn.description:
+        return res
+    header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
     if set(columns).intersection(set(header)):
         varVal = False
     else:

@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.2 2012/05/18 17:28:14 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.3 2012/05/23 20:44:58 egor Exp $"""
 
-__version__ = "$Revision: 3.2 $"[11:-2]
+__version__ = "$Revision: 3.3 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -28,6 +28,7 @@ from ZODB.POSException import ConflictError
 
 from Products.ZenCollector.services.config import CollectorConfigService
 from Products.ZenUtils.ZenTales import talesEval
+from Products.ZenModel.Device import Device
 from ZenPacks.community.SQLDataSource.SQLClient import DataSourceConfig,\
                                                         DataPointConfig
 from ZenPacks.community.SQLDataSource.datasources.SQLDataSource \
@@ -47,7 +48,9 @@ class SqlPerformanceConfig(CollectorConfigService):
         Given a component a data source, gather its data points
         """
         points = []
-        component_name = getattr(comp, 'id', '')
+        component_name = ''
+        if not isinstance(comp, Device):
+            component_name = getattr(comp, 'id', '')
         basepath = comp.rrdPath()
         for dp in ds.getRRDDataPoints():
             alias = (dp.aliases() or [dp])[0]
