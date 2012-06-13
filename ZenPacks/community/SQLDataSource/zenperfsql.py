@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.4 2012/04/25 19:49:27 egor Exp $"""
+$Id: zenperfsql.py,v 3.5 2012/06/13 19:57:12 egor Exp $"""
 
-__version__ = "$Revision: 3.4 $"[11:-2]
+__version__ = "$Revision: 3.5 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -418,16 +418,14 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                     dpvalue = time.mktime(dpvalue.timetuple())
                 elif isinstance(dpvalue, timedelta):
                     dpvalue = dpvalue.seconds
-                if dp.expr:
-                    if dp.expr.__contains__(':'):
-                        for vmap in dp.expr.split(','):
-                            var, val = vmap.split(':')
-                            if var.strip('"') != dpvalue: continue
-                            dpvalue = int(val)
-                            break
-                    else:
-                        dpvalue = rrpn(dp.expr, dpvalue)
-                values.append(dpvalue)
+                try:
+                    if dp.expr:
+                        if dp.expr.__contains__(':'):
+                            dpvalue = eval('{%s}'%dp.expr).get(str(dpvalue))
+                        else:
+                            dpvalue = rrpn(dp.expr, dpvalue)
+                    values.append(float(dpvalue))
+                except: continue
             if dp.id.endswith('_count'): value = len(values)
             elif not values: value = None
             elif len(values) == 1: value = values[0]
