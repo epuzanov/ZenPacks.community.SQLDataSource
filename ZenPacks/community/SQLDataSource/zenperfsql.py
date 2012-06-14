@@ -373,7 +373,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             log.debug("Datasource %s %squery:'%s'", datasource.name,
                 self._preferences.options.showconnectionstring and \
                 "connection string: '%s', " % datasource.connectionString or "",
-                datasource.sqlp)
+                datasource.sql)
             datasource.deviceConfig = self._device
             task = self._executor.submit(datasource)
             task.addBoth(self._processDatasourceResults)
@@ -421,7 +421,11 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                 try:
                     if dp.expr:
                         if dp.expr.__contains__(':'):
-                            dpvalue = eval('{%s}'%dp.expr).get(str(dpvalue))
+                            ed = eval('{%s}'%dp.expr.lower())
+                            if isinstance(dpvalue, float):
+                                dpvalue = int(dpvalue)
+                            dpvalue = ed.get(str(dpvalue).lower()) or ed.get(
+                                                                    'unknown')
                         else:
                             dpvalue = rrpn(dp.expr, dpvalue)
                     values.append(float(dpvalue))
