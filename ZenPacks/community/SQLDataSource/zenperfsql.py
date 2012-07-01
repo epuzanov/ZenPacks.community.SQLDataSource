@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.5 2012/06/13 19:57:12 egor Exp $"""
+$Id: zenperfsql.py,v 3.6 2012/07/01 23:14:33 egor Exp $"""
 
-__version__ = "$Revision: 3.5 $"[11:-2]
+__version__ = "$Revision: 3.6 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -430,7 +430,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                             dpvalue = rrpn(dp.expr, dpvalue)
                     values.append(float(dpvalue))
                 except: continue
-            if dp.id.endswith('_count'): value = len(values)
+            if dp.id.endswith('_count'): value = len(datasource.result)
             elif not values: value = None
             elif len(values) == 1: value = values[0]
             elif dp.id.endswith('_avg'):value = sum(values) / len(values)
