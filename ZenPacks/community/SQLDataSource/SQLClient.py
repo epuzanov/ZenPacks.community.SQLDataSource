@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.7 2012/05/23 20:27:21 egor Exp $"""
+$Id: SQLClient.py,v 3.8 2012/07/13 11:16:12 egor Exp $"""
 
-__version__ = "$Revision: 3.7 $"[11:-2]
+__version__ = "$Revision: 3.8 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -38,6 +38,15 @@ except:
     ADBAPIPOOLS = {}
     def getPool(name, factory=None):
         return ADBAPIPOOLS
+
+class TimeoutError(Exception):
+    """
+    Error for a defered call taking too long to complete
+    """
+
+    def __init__(self, *args):
+        Exception.__init__(self)
+        self.args = args
 
 def parseConnectionString(cs='', options={}):
     try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
