@@ -12,10 +12,11 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.6 2012/07/01 23:14:33 egor Exp $"""
+$Id: zenperfsql.py,v 3.7 2012/08/06 20:26:04 egor Exp $"""
 
-__version__ = "$Revision: 3.6 $"[11:-2]
+__version__ = "$Revision: 3.7 $"[11:-2]
 
+import pysamba.twisted.reactor
 import time
 from datetime import datetime, timedelta
 import logging

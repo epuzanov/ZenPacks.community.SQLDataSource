@@ -12,20 +12,21 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.8 2012/07/13 11:16:12 egor Exp $"""
+$Id: SQLClient.py,v 3.9 2012/08/06 20:16:22 egor Exp $"""
 
-__version__ = "$Revision: 3.8 $"[11:-2]
+__version__ = "$Revision: 3.9 $"[11:-2]
 
+if __name__ == "__main__":
+    import pysamba.twisted.reactor
 import logging
 log = logging.getLogger("zen.SQLClient")
 
 import Globals
 
 from Products.DataCollector.BaseClient import BaseClient
-from twisted.internet.defer import Deferred, DeferredList
+from twisted.internet import defer, reactor
 from twisted.python.failure import Failure
 from twisted.enterprise import adbapi
-from twisted.internet import reactor
 from twisted.spread import pb
 
 from threading import Timer
@@ -71,75 +72,137 @@ def parseConnectionString(cs='', options={}):
     kwargs.update(options)
     return args, kwargs
 
-def runQuery(txn, sql, columns, dbapi, timeout):
-    """
-    execute a sql query.
+class adbapiClient(object):
 
-    @param txn: database cursor
-    @type txn: dbapi.cursor or adbapi.Transaction
-    @param sql: sql operation
-    @type sql: string
-    @param columns: columns to return
-    @type columns: list
-    @param dbapi: dbapi module to use
-    @type dbapi: module
-    @param timeout: timeout in seconds
-    @type timeout: int
-    """
-    def _timeout(txn):
-        if isinstance(txn, dbapi.Transaction):
-            cursor = txn._cursor
-            connection = txn._connection
-        else:
-            cursor = txn
-            connection = getattr(cursor, 'connection', lambda:None)()
-        if hasattr(connection, 'cancel'):
-            connection.cancel()
-        cursor.close()
-    def _convert(val, type):
+    def __init__(self, cs):
+        """
+        @type cs: string
+        @param cs: connection string
+        """
+        self.cs = cs
+        self._dbapi = None
+        self._connection = None
+
+    def connect(self):
+        try:
+            args, kwargs = parseConnectionString(self.cs)
+            self._connection = adbapi.ConnectionPool(*args, **kwargs)
+            self._dbapi = self._connection.dbapi
+            return defer.succeed(self)
+        except Exception, ex:
+            return defer.fail(ex)
+
+    def close(self):
+        if self._connection:
+            self._connection.close()
+            self._connection = None
+
+    def _timeout(self, txn):
+        if hasattr(txn._connection, 'cancel'):
+            txn._connection.cancel()
+        txn._cursor.close()
+
+    def _convert(self, val, type):
         if val is None:
-            if type == dbapi.STRING:
+            if type == self._dbapi.STRING:
                 return ''
-            if type == dbapi.NUMBER:
+            if type == self._dbapi.NUMBER:
                 return 0
             return None
-        if val and type == dbapi.NUMBER:
+        if val and type == self._dbapi.NUMBER:
             return float(val)
-        if type == dbapi.STRING:
+        if type == self._dbapi.STRING:
             return str(val).strip()
         return val
-    res = []
-    t = Timer(timeout, _timeout, txn)
-    t.start()
-    try:
-        for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
-            if not q.strip(): continue
-            txn.execute(q.strip())
-    except Exception, ex:
-        if t.isAlive():
-            t.cancel()
-        else:
-            ex = TimeoutError('Query Timeout')
-        raise ex
-    t.cancel()
-    if not txn.description:
-        return res
-    header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
-    if set(columns).intersection(set(header)):
-        varVal = False
-    else:
-        res.append({})
-        varVal = True
-    rows = txn.fetchmany()
-    while rows:
-        for row in rows:
-            if varVal:
-                res[0][str(row[0]).lower()] = _convert(row[-1], ct[-1])
-            else:
-                res.append(dict(zip(header,[_convert(*v) for v in zip(row,ct)])))
-        rows = txn.fetchmany()
-    return res
 
+    def runQuery(self, txn, sql, columns, timeout):
+        """
+        execute a sql query.
+
+        @param txn: database cursor
+        @type txn: dbapi.cursor or adbapi.Transaction
+        @param sql: sql operation
+        @type sql: string
+        @param columns: columns to return
+        @type columns: list
+        @param timeout: timeout in seconds
+        @type timeout: int
+        """
+        res = []
+        t = Timer(timeout, self._timeout, txn)
+        t.start()
+        try:
+            for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
+                if not q.strip(): continue
+                txn.execute(q.strip())
+        except Exception, ex:
+            if t.isAlive():
+                t.cancel()
+            else:
+                ex = TimeoutError('Timeout')
+            raise ex
+        t.cancel()
+        if not txn.description:
+            return res
+        header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
+        if set(columns).intersection(set(header)):
+            varVal = False
+        else:
+            res.append({})
+            varVal = True
+        rows = txn.fetchmany()
+        while rows:
+            for row in rows:
+                if varVal:
+                    res[0][str(row[0]).lower()] = self._convert(row[-1], ct[-1])
+                else:
+                    res.append(dict(zip(header,
+                                    [self._convert(*v) for v in zip(row,ct)])))
+            rows = txn.fetchmany()
+        return res
+
+    def query(self, task):
+        """
+        execute a sql query.
+
+        @param task: task to run
+        @type task: DataSourceConfig
+        """
+        return self._connection.runInteraction(self.runQuery, task.sqlp,
+                                                task.columns, task.timeout)
+
+
+class dbapiClient(adbapiClient):
+
+    def connect(self):
+        fl = []
+        args, kwargs = parseConnectionString(self.cs)
+        if '.' in args[0]:
+            fl.append(args[0].split('.')[-1])
+        dbapi = __import__(args[0], globals(), locals(), fl)
+        self._dbapi = dbapi
+        self._connection = dbapi.connect(*args[1:], **kwargs)
+        return self
+
+    def _timeout(self, txn):
+        if hasattr(self._connection, 'cancel'):
+            self._connection.cancel()
+        txn.close()
+
+    def query(self, task):
+        """
+        execute a sql query.
+
+        @param task: task to run
+        @type task: DataSourceConfig
+        """
+        try:
+            cursor = self._connection.cursor()
+            result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
+            cursor.close()
+        except Exception, ex:
+            result = Failure(ex)
+        return result
 
 class adbapiExecutor(object):
     """
@@ -177,30 +240,49 @@ class adbapiExecutor(object):
         @param task: task to be executed
         @type task: DataSourceConfig
         """
-        deferred = Deferred()
+        deferred = defer.Deferred()
         deferred.addBoth(self._taskFinished, task)
         task.result = deferred
         self._taskQueue.append(task)
         reactor.callLater(2, self._runTask)
         return deferred
 
+    def _connect(self, task):
+        if self._connection:
+            if self._cs == task.connectionString:
+                return defer.succeed(self._connection)
+            else:
+                self._connection.close()
+                self._connection = None
+        self._cs = task.connectionString
+        if task.connectionString.startswith("'pywmidb'"):
+            from pysambaClient import pysambaClient
+            self._connection = pysambaClient(task.connectionString)
+        else:
+            self._connection = adbapiClient(task.connectionString)
+        return defer.maybeDeferred(self._connection.connect)
+
+    def _connected(self, connection, task):
+        d = self._connection.query(task)
+        d.addBoth(self._finished)
+        return d
+
+    def _notConnected(self, results):
+        if self._connection:
+            self._connection.close()
+            self._connection = None
+        self._finished(results)
+
     def _runTask(self):
-        if self._taskQueue and self._running < self._max:
-            self._running += 1
-            task = self._taskQueue[0]
-            if task.connectionString != self._cs or not self._connection:
-                if self._connection:
-                    self._connection.close()
-                    self._connection = None
-                args, kwargs = parseConnectionString(task.connectionString)
-                connection = adbapi.ConnectionPool(*args, **kwargs)
-                self._cs = task.connectionString
-                self._connection = connection
-            self._currentTask = hash((task.sqlp, str(task.columns)))
-            deferred = self._connection.runInteraction( runQuery, task.sqlp,
-                            task.columns, self._connection.dbapi, task.timeout)
-            deferred.addBoth(self._finished)
-            reactor.callLater(0, self._runTask)
+        if not self._taskQueue or self._running >= self._max:
+            return
+        self._running += 1
+        task = self._taskQueue[0]
+        self._currentTask = hash((task.sqlp, str(task.columns)))
+        d = self._connect(task)
+        d.addCallback(self._connected, task)
+        d.addErrback(self._notConnected)
+        reactor.callLater(0, self._runTask)
 
     def _finished(self, results):
         nextTask = 0
@@ -235,8 +317,9 @@ class adbapiExecutor(object):
         if self._running > 0:
             self._running -= 1
         if not self._taskQueue and self._running < 1:
-            self._connection.close()
-            self._connection = None
+            if self._connection:
+                self._connection.close()
+                self._connection = None
             self._cs = None
             self._currentTask = None
         reactor.callLater(0, self._runTask)
@@ -376,29 +459,15 @@ class SQLClient(BaseClient):
         for table, task in queries.iteritems():
             tasks.setdefault(task[2], []).append((table, task))
         for cs, csTasks in tasks.iteritems():
-            args, kwargs = parseConnectionString(cs)
-            fl = []
-            if '.' in args[0]:
-                fl.append(args[0].split('.')[-1])
-            dbapi = __import__(args[0], globals(), locals(), fl)
-            connection = dbapi.connect(*args[1:], **kwargs)
+            client = dbapiClient(cs)
+            if not client.connect(): continue
             for table, task in csTasks:
                 dsc = DataSourceConfig(*task)
-                cursor = connection.cursor()
-                try:
-                    dsc.result = runQuery(cursor, dsc.sql, dsc.columns, dbapi,
-                                        dsc.timeout)
-                    cursor.close()
-                except Exception, ex:
-                    if hasattr(connection, 'close'):
-                        connection.close()
-                    connection = None
-                    raise ex
-                cursor = None
-                t, result = self.parseResult(dsc, '', table, args[0])
+                dsc.result = client.query(dsc)
+                t,result = self.parseResult(dsc,'',table,client._dbapi.__name__)
                 results[table] = result
-            connection.close()
-            connection = None
+            client.close()
+            client = None
         return results
 
 
@@ -417,10 +486,10 @@ class SQLClient(BaseClient):
                 deferred = executor.submit(dsc)
                 deferred.addBoth(self.parseResult,plugin.name(),table,dbapiName)
                 tasks.append(deferred)
-            tdl = DeferredList(tasks)
+            tdl = defer.DeferredList(tasks)
             deferreds.append(tdl)
             tdl.addBoth(self.collectComplete, plugin)
-        dl = DeferredList(deferreds)
+        dl = defer.DeferredList(deferreds)
         dl.addBoth(self.collectComplete, None)
 
 
