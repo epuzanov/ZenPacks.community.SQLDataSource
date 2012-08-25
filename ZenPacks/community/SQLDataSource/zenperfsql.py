@@ -1,3 +1,4 @@
+
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
@@ -12,9 +13,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.6 2012/07/01 23:14:33 egor Exp $"""
+$Id: zenperfsql.py,v 3.9 2012/08/25 23:03:05 egor Exp $"""
 
-__version__ = "$Revision: 3.6 $"[11:-2]
+__version__ = "$Revision: 3.9 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -410,7 +411,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             values = []
             for row in datasource.result:
                 dpvalue = row.get(dp.alias, None)
-                if dpvalue == None or dpvalue == '':
+                if dpvalue in (None, '', []):
                     continue
                 elif type(dpvalue) is list:
                     dpvalue = dpvalue[0]
