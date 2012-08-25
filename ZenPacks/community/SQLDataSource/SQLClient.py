@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.9 2012/08/06 20:16:22 egor Exp $"""
+$Id: SQLClient.py,v 3.10 2012/08/25 22:46:58 egor Exp $"""
 
-__version__ = "$Revision: 3.9 $"[11:-2]
+__version__ = "$Revision: 3.10 $"[11:-2]
 
 if __name__ == "__main__":
     import pysamba.twisted.reactor
@@ -35,7 +35,7 @@ import re
 
 try:
     from Products.ZenCollector.pools import getPool
-except:
+except ImportError:
     ADBAPIPOOLS = {}
     def getPool(name, factory=None):
         return ADBAPIPOOLS
@@ -82,12 +82,14 @@ class adbapiClient(object):
         self.cs = cs
         self._dbapi = None
         self._connection = None
+        self.ready = None
 
     def connect(self):
         try:
             args, kwargs = parseConnectionString(self.cs)
             self._connection = adbapi.ConnectionPool(*args, **kwargs)
             self._dbapi = self._connection.dbapi
+            self.ready = True
             return defer.succeed(self)
         except Exception, ex:
             return defer.fail(ex)
@@ -96,6 +98,7 @@ class adbapiClient(object):
         if self._connection:
             self._connection.close()
             self._connection = None
+        self.ready = None
 
     def _timeout(self, txn):
         if hasattr(txn._connection, 'cancel'):
@@ -104,13 +107,14 @@ class adbapiClient(object):
 
     def _convert(self, val, type):
         if val is None:
-            if type == self._dbapi.STRING:
-                return ''
-            if type == self._dbapi.NUMBER:
-                return 0
+            if type == self._dbapi.STRING: return ''
+            if type == self._dbapi.NUMBER: return 0
             return None
         if val and type == self._dbapi.NUMBER:
-            return float(val)
+            if isinstance(val, (int, long, float)): return val
+            if str(val).isdigit(): return long(val)
+            if str(val).replace('.', '', 1).isdigit(): return float(val)
+            return val
         if type == self._dbapi.STRING:
             return str(val).strip()
         return val
@@ -182,6 +186,7 @@ class dbapiClient(adbapiClient):
         dbapi = __import__(args[0], globals(), locals(), fl)
         self._dbapi = dbapi
         self._connection = dbapi.connect(*args[1:], **kwargs)
+        self.ready = True
         return self
 
     def _timeout(self, txn):
@@ -215,7 +220,6 @@ class adbapiExecutor(object):
         self._taskQueue = []
         self._connection = None
         self._cs = None
-        self._currentTask = None
 
     def setMax(self, max):
         self._max = max
@@ -256,42 +260,43 @@ class adbapiExecutor(object):
                 self._connection = None
         self._cs = task.connectionString
         if task.connectionString.startswith("'pywmidb'"):
-            from pysambaClient import pysambaClient
-            self._connection = pysambaClient(task.connectionString)
+            try:
+                from pysambaClient import pysambaClient
+                self._connection = pysambaClient(task.connectionString)
+            except ImportError:
+                self._connection = adbapiClient(task.connectionString)
         else:
             self._connection = adbapiClient(task.connectionString)
         return defer.maybeDeferred(self._connection.connect)
 
     def _connected(self, connection, task):
+        self._connection.ready = True
         d = self._connection.query(task)
-        d.addBoth(self._finished)
+        d.addBoth(self._finished, task)
         return d
-
-    def _notConnected(self, results):
-        if self._connection:
-            self._connection.close()
-            self._connection = None
-        self._finished(results)
 
     def _runTask(self):
         if not self._taskQueue or self._running >= self._max:
             return
         self._running += 1
         task = self._taskQueue[0]
-        self._currentTask = hash((task.sqlp, str(task.columns)))
         d = self._connect(task)
         d.addCallback(self._connected, task)
-        d.addErrback(self._notConnected)
+        d.addErrback(self._finished, task)
         reactor.callLater(0, self._runTask)
 
-    def _finished(self, results):
+    def _finished(self, results, currentTask):
+        cTask = (currentTask.sqlp, str(currentTask.columns))
         nextTask = 0
         if isinstance(results, Failure):
+            if not getattr(self._connection, 'ready', None):
+                if hasattr(self._connection, 'close'):
+                    self._connection.close()
+                self._connection = None
             results.cleanFailure()
         for i in reversed(range(len(self._taskQueue))):
             if self._cs != self._taskQueue[i].connectionString: continue
-            if self._currentTask != hash((self._taskQueue[i].sqlp,
-                                        str(self._taskQueue[i].columns))):
+            if (self._taskQueue[i].sqlp,str(self._taskQueue[i].columns))!=cTask:
                 nextTask = i
                 continue
             if nextTask > 0: nextTask -= 1
@@ -321,7 +326,6 @@ class adbapiExecutor(object):
                 self._connection.close()
                 self._connection = None
             self._cs = None
-            self._currentTask = None
         reactor.callLater(0, self._runTask)
         task.result = result
         return task
@@ -683,4 +687,3 @@ if __name__ == "__main__":
     print "|".join(columns.values())
     for row in results:
         print "|".join([str(row.get(dpname,'')) for dpname in columns.values()])
-

@@ -12,13 +12,13 @@ __doc__="""pysambaClient
 
 Gets performance data over WMI.
 
-$Id: pysambaClient.py,v1.0 2012/08/06 20:27:28 egor Exp $"""
+$Id: pysambaClient.py,v1.1 2012/08/08 19:15:52 egor Exp $"""
 
-__version__ = "$Revision: 1.0 $"[11:-2]
+__version__ = "$Revision: 1.1 $"[11:-2]
 
 from pysamba.library import *
 from pysamba.wbem.wbem import *
-from pysamba.wbem.Query import Query, QueryResult, _WbemObject, convert
+from pysamba.wbem.Query import Query, QueryResult
 from pysamba.twisted.callback import Callback, WMIFailure
 from pysamba.twisted.reactor import eventContext
 
@@ -27,62 +27,123 @@ from twisted.internet import defer
 import logging
 log = logging.getLogger("zen.pysambaClient")
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
-DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
+DTPAT = re.compile(r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+|-]\d{3})')
+TDPAT = re.compile(r'^(\d{8})(\d{2})(\d{2})(\d{2})\.(\d{6})')
 
-WbemQualifier._fields_ = [
+if not getattr(WbemQualifier, "_fields_", None):
+    WbemQualifier._fields_ = [
         ('name', CIMSTRING),
         ('flavors', uint8_t),
         ('cimtype', uint32_t),
         ('value', CIMVAR),
         ]
 
-def wbemInstanceWithQualifiersToPython(obj):
+def convertArray(arr):
+    if not arr: return None
+    return [arr.contents.item[i] for i in range(arr.contents.count)]
+
+def convert(v, typeval):
+    if typeval == CIM_SINT8: return v.v_sint8
+    if typeval == CIM_UINT8: return v.v_uint8
+    if typeval == CIM_SINT16: return v.v_sint16
+    if typeval == CIM_UINT16: return v.v_uint16
+    if typeval == CIM_SINT32: return v.v_sint32
+    if typeval == CIM_UINT32: return v.v_uint32
+    if typeval == CIM_SINT64: return v.v_sint64
+    if typeval == CIM_UINT64: return v.v_sint64
+    if typeval == CIM_REAL32: return float(v.v_uint32)
+    if typeval == CIM_REAL64: return float(v.v_uint64)
+    if typeval == CIM_BOOLEAN: return bool(v.v_boolean)
+    if typeval == CIM_DATETIME:
+        dt = str(v.v_datetime)
+        s = DTPAT.match(dt)
+        if s is not None:
+            tt = map(int, s.groups(0))
+            return datetime(*tt[:7]) #+ timedelta(minutes=tt[7])
+        s = TDPAT.match(dt)
+        if s is None: return str(dt)
+        try: return timedelta(**dict(zip(
+            ('days','hours','minutes','microseconds'),map(int, s.groups(0)))))
+        except Exception: return v.v_string or ""
+    if typeval == CIM_STRING:
+        return v.v_string or ""
+    if typeval == CIM_REFERENCE:
+        if not v.v_string.startswith(r'\\'): return v.v_string
+        return v.v_string.split(':', 1)[-1]
+    if typeval == CIM_CHAR16:
+        return v.v_string.decode('utf16')
+    if typeval == CIM_OBJECT:
+        return v.v_string or ""
+    if typeval == CIM_ARR_SINT8: return convertArray(v.a_sint8)
+    if typeval == CIM_ARR_UINT8: return convertArray(v.a_uint8)
+    if typeval == CIM_ARR_SINT16: return convertArray(v.a_sint16)
+    if typeval == CIM_ARR_UINT16: return convertArray(v.a_uint16)
+    if typeval == CIM_ARR_SINT32: return convertArray(v.a_sint32)
+    if typeval == CIM_ARR_UINT32: return convertArray(v.a_uint32)
+    if typeval == CIM_ARR_SINT64: return convertArray(v.a_sint64)
+    if typeval == CIM_ARR_UINT64: return convertArray(v.a_uint64)
+    if typeval == CIM_ARR_REAL32: return convertArray(v.a_real32)
+    if typeval == CIM_ARR_REAL64: return convertArray(v.a_real64)
+    if typeval == CIM_ARR_BOOLEAN: return convertArray(v.a_boolean)
+    if typeval == CIM_ARR_STRING: return convertArray(v.a_string)
+    if typeval == CIM_ARR_DATETIME:
+        return convertArray(v.contents.a_datetime)
+    if typeval == CIM_ARR_REFERENCE:
+        return convertArray(v.contents.a_reference)
+    return "Unsupported"
+
+def wbemInstanceToPython(obj, qualifiers=False):
     klass = obj.contents.obj_class.contents
     inst = obj.contents.instance.contents
-    result = _WbemObject()
+    result = {}
     kb = []
-    result.__class = klass.__CLASS
-    result.__namespace = obj.contents.__NAMESPACE.replace("\\", '/')
+    result['__class'] = klass.__CLASS
+    result['__namespace'] = obj.contents.__NAMESPACE.replace("\\", '/')
     for j in range(klass.__PROPERTY_COUNT):
         prop = klass.properties[j]
         value = convert(inst.data[j], prop.desc.contents.cimtype & CIM_TYPEMASK)
-        for qi in range(prop.desc.contents.qualifiers.count):
-            q = prop.desc.contents.qualifiers.item[qi].contents
-            if q.name in ['key'] and convert(q.value, q.cimtype) == True:
-                kb.append("%s=%s"%(prop.name,
+        if qualifiers:
+            for qi in range(prop.desc.contents.qualifiers.count):
+                q = prop.desc.contents.qualifiers.item[qi].contents
+                if q.name in ['key'] and convert(q.value, q.cimtype) == True:
+                    kb.append("%s=%s"%(prop.name,
                             type(value) is str and '"%s"'%value or value))
         if prop.name:
-            setattr(result, prop.name.lower(), value)
-    result.__path = "%s.%s"%(klass.__CLASS, ",".join(kb))
+            result[prop.name.lower()] = value
+    if qualifiers:
+        result['__path'] = "%s.%s"%(klass.__CLASS, ",".join(kb))
     return result
 
-def fetchSome(obj, timeoutMs=-1, chunkSize=10):
+def fetchSome(obj, timeoutMs=-1, chunkSize=10, qualifiers=False):
 
     assert obj.pEnum
-    count = uint32_t()
-    objs = (POINTER(WbemClassObject)*chunkSize)()
 
     ctx = library.IEnumWbemClassObject_SmartNext_send(
-        obj.pEnum, None, timeoutMs, chunkSize)
+        obj.pEnum, None, timeoutMs, chunkSize
+        )
 
-    def parse(results):
+    cback = Callback()
+    ctx.contents.async.fn = cback.callback
+
+    def fetch(results):
+        count = uint32_t()
+        objs = (POINTER(WbemClassObject)*chunkSize)()
         result = library.IEnumWbemClassObject_SmartNext_recv(
-            ctx, obj.ctx, objs, byref(count))
+            ctx, obj.ctx, objs, byref(count)
+            )
 
         WERR_CHECK(result, obj._deviceId, "Retrieve result data.")
 
         result = []
         for i in range(count.value):
-            result.append(wbemInstanceWithQualifiersToPython(objs[i]))
+            result.append(wbemInstanceToPython(objs[i], qualifiers))
             library.talloc_free(objs[i])
         return result
 
-    cback = Callback()
-    ctx.contents.async.fn = cback.callback
     d = cback.deferred
-    d.addCallback(parse)
+    d.addCallback(fetch)
     return d
 
 def parseConnectionString(cs='', options={}):
@@ -117,6 +178,7 @@ class pysambaClient(object):
         """
         self.cs = cs
         self._wmi = None
+        self.ready = None
 
     def connect(self):
         args, kwargs = parseConnectionString(self.cs)
@@ -137,38 +199,26 @@ class pysambaClient(object):
     def close(self):
         if self._wmi:
             self._wmi.close()
+        self._wmi.pWS = None
+        self._wmi = None
+        self.ready = None
 
-    def _fetchResults(self, results, timeout, qualifier, result=None, rows=[]):
+    def _fetchResults(self, results, timeout, qualifiers, result=None, rows=[]):
         if not results:
             return defer.succeed(rows)
         elif isinstance(results, QueryResult):
+            rows = []
             result = results
         else:
-            for inst in results:
-                row = {}
-                for aname, value in inst.__dict__.iteritems():
-                    if callable(value): continue 
-                    if type(value) is str:
-                        r = DTPAT.match(str(value))
-                        if r:
-                            tt = map(int, r.groups(0))
-                            if abs(tt[7]) > 30: mins = tt[7]
-                            elif tt[7] < 0: mins = 60 * tt[7] - tt[8]
-                            else: mins = 60 * tt[7] + tt[8]
-                            try: value=datetime(*tt[:7])-timedelta(minutes=mins)
-                            except Exception: pass
-                    row[aname] = value or ""
-                rows.append(row)
-        if qualifier:
-            d = fetchSome(result, timeoutMs=timeout)
-        else:
-            d = result.fetchSome(timeoutMs=timeout)
-        d.addCallback(self._fetchResults, timeout, qualifier, result, rows)
+            rows.extend(results)
+        d = fetchSome(result, timeoutMs=timeout, qualifiers=qualifiers)
+        d.addCallback(self._fetchResults, timeout, qualifiers, result, rows)
         return d
 
     def query(self, task):
         timeout = task.timeout * 1000
-        qualifier = task.ds == ''
+        qualifiers = task.ds == ''
+        rows = []
         d = self._wmi.query(task.sqlp)
-        d.addCallback(self._fetchResults, timeout, qualifier)
+        d.addCallback(self._fetchResults, timeout, qualifiers, rows)
         return d

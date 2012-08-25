@@ -20,13 +20,16 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.1.9'
+__version__ = '2.2.0'
 
 import socket
-from xml.sax import handler, make_parser
-import httplib, urllib2
+from xml.sax import xmlreader, handler, make_parser, SAXParseException
+import httplib, base64
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
 from datetime import datetime, timedelta
-from distutils.version import StrictVersion
 import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
@@ -262,6 +265,9 @@ class CIMHandler(handler.ContentHandler):
         handler.ContentHandler.__init__(self)
         self._in=['IRETURNVALUE','IMETHODRESPONSE','SIMPLERSP','MESSAGE','CIM']
         self._cur = cursor
+        self._con = cursor._connection
+        self._methodname = cursor._dialect and 'ExecQuery' or 'EnumerateInstances'
+        self._namespace = cursor._namespace
         self._qName = ''
         self._rName = ''
         self._rClass = ''
@@ -279,9 +285,9 @@ class CIMHandler(handler.ContentHandler):
             tag = self._in.pop()
             if name == tag:
                 if name != 'IMETHODRESPONSE' or str(attrs._attrs.get('NAME',
-                                        '')) == self._cur._methodname: return
+                                        '')) == self._methodname: return
                 raise InterfaceError(0, 'Expecting attribute NAME=%s, got %s'%(
-                    self._cur._methodname, str(attrs._attrs.get('NAME', ''))))
+                    self._methodname, str(attrs._attrs.get('NAME', ''))))
             elif name == 'ERROR':
                 errcode = int(attrs._attrs.get('CODE', 0))
                 raise InterfaceError(errcode, attrs._attrs.get('DESCRIPTION',
@@ -314,7 +320,7 @@ class CIMHandler(handler.ContentHandler):
                 self._rClass = str(attrs._attrs.get('CLASSNAME', ''))
             else:
                 self._pdict['__CLASS'] = str(attrs._attrs.get('CLASSNAME', ''))
-                self._pdict['__NAMESPACE'] = self._cur.connection._namespace
+                self._pdict['__NAMESPACE'] = self._namespace
         elif name == 'PROPERTY.REFERENCE':
             self._rName = str(attrs._attrs.get('NAME', ''))
             self._rClass = str(attrs._attrs.get('REFERENCECLASS', ''))
@@ -383,20 +389,6 @@ class CIMHandler(handler.ContentHandler):
                                                             ','.join(self._kbs))
             del self._kbs[:]
 
-
-### HTTPSClientAuthHandler object
-
-class HTTPSClientAuthHandler(urllib2.HTTPSHandler):
-    def __init__(self, key, cert):
-        urllib2.HTTPSHandler.__init__(self)
-        self.key = key
-        self.cert = cert
-    def https_open(self, req):
-        return self.do_open(self.getConnection, req)
-    def getConnection(self, host):
-        return httplib.HTTPSConnection(host, key_file=self.key, cert_file=self.cert)
-
-
 ### cursor object
 
 class wbemCursor(object):
@@ -409,17 +401,16 @@ class wbemCursor(object):
         """
         Initialize a Cursor object. connection is a wbemCnx object instance.
         """
-        self.connection = connection
+        self._connection = connection
+        self._dialect = connection._dialect
+        self._namespace = connection._namespace
         self.description = None
         self.rownumber = -1
         self.arraysize = 1
         self._rows = []
         self._props = []
         self._keybindings = {}
-        self._methodname = ''
-        self._xml_repl = None
-        self._parser = make_parser()
-        self._parser.setContentHandler(CIMHandler(self))
+        self._parser = None
 
     @property
     def rowcount(self):
@@ -430,8 +421,18 @@ class wbemCursor(object):
         """
         return len(self._rows)
 
+    def _get_parser(self):
+        """
+        Returns parser object
+        """
+        if not self._parser:
+            parser = make_parser()
+            parser.setContentHandler(CIMHandler(self))
+            self._parser = parser
+        return self._parser
+
     def _check_executed(self):
-        if not self.connection:
+        if not self._connection:
             raise InterfaceError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
@@ -444,9 +445,8 @@ class wbemCursor(object):
         Closes the cursor. The cursor is unusable from this point.
         """
         self.description = None
-        self.connection = None
+        self._connection = None
         self._parser = None
-        self._xml_repl = None
 
     def execute(self, operation, *args):
         """
@@ -459,10 +459,9 @@ class wbemCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not self.connection:
+        if not self._connection:
             raise InterfaceError("Connection closed.")
         self.description = None
-        self._xml_repl = None
         self.rownumber = -1
         del self._rows[:]
         self._keybindings.clear()
@@ -492,25 +491,25 @@ class wbemCursor(object):
                     if props != '*':
                         kbkeys = ',%s'%','.join(self._keybindings.keys())
                     operation = 'SELECT %s%s FROM %s'%(props, kbkeys, classname)
-                elif self.connection._dialect: self._keybindings.clear()
+                elif self._dialect:
+                    self._keybindings.clear()
             except: self._keybindings.clear()
         if props == '*': self._props = []
         else: self._props = [p for p in props.replace(' ','').split(',')]
         try:
-            if self.connection._dialect:
-                self._methodname = 'ExecQuery'
-                self._xml_repl = self.connection._wbem_request(self._methodname,
-                        EXECQUERY_IPARAM%(operation, self.connection._dialect))
+            if self._dialect:
+                xml_req = XML_REQ%('ExecQuery',
+                    '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')),
+                    EXECQUERY_IPARAM%(EXECQUERY_IPARAM%operation,self._dialect))
             else:
-                self._methodname = 'EnumerateInstances'
                 pLst = [p for p in set(self._props) \
                     if p.upper() not in ('__PATH','__CLASS','__NAMESPACE')]
                 pLst.extend(self._keybindings.keys())
-                self._xml_repl = self.connection._wbem_request(self._methodname,
+                xml_req = XML_REQ%('EnumerateInstances',
+                    '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')),
                     ''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
-                    pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')
-                    ))
-            self._parser.parse(self._xml_repl)
+                    pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')))
+            self._connection._wbem_request(xml_req, self._get_parser())
             if self.description: self.rownumber = 0
 
         except InterfaceError, e:
@@ -601,68 +600,92 @@ class pywbemCnx:
     This class represent an WBEM Connection connection.
     """
     def __init__(self, *args, **kwargs):
-        self._timeout = float(kwargs.get('timeout', 60))
-        self._host = kwargs.get('host', 'localhost')
-        self._scheme = kwargs.get('scheme', 'https')
-        self._port=int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))
-        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._connection = None
+        self._timeout = None
+        conkwargs = {}
         self._dialect = kwargs.get('dialect', '').upper()
-        self._url='%s://%s:%s/cimom'%(self._scheme,self._host,self._port)
-        self._urlOpener = urllib2.build_opener()
+        scheme = str(kwargs.get('scheme', 'https')).lower()
+        conkwargs = {
+            'host':kwargs.get('host') or 'localhost',
+            'port':int(kwargs.get('port', scheme == 'http' and 5988 or 5989))}
+        self._namespace = kwargs.get('namespace') or 'root/cimv2'
+        self._headers = {'Content-type': 'application/xml; charset="utf-8"',
+            'CIMOperation': 'MethodCall',
+            'CIMMethod': self._dialect and 'ExecQuery' or 'EnumerateInstances',
+            'CIMObject': self._namespace}
         if 'user' in kwargs:
-            passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
-            passman.add_password(None,self._url,kwargs['user'],
-                                            kwargs.get('password', ''))
-            authhandler = urllib2.HTTPBasicAuthHandler(passman)
-            self._urlOpener.add_handler(authhandler)
-        elif 'key_file' in kwargs and 'cert_file' in kwargs:
-            sslauthhandler = HTTPSClientAuthHandler(kwargs['key_file'],
-                                                    kwargs['cert_file'])
-            self._urlOpener.add_handler(sslauthhandler)
+            self._headers['Authorization'] = 'Basic %s'%base64.encodestring(
+                '%s:%s'%(kwargs['user'], kwargs.get('password','')))[:-1]
+        if scheme == 'https':
+            if 'key_file' in kwargs and 'cert_file' in kwargs:
+                conkwargs['key_file'] = kwargs['key_file']
+                conkwargs['cert_file'] = kwargs['cert_file']
+            self._connection = httplib.HTTPSConnection(**conkwargs)
+        else:
+            self._connection = httplib.HTTPConnection(**conkwargs)
+        if hasattr(self._connection, 'timeout'):
+            self._connection.timeout = float(kwargs.get('timeout', 60))
+        else:
+            self._timeout = float(kwargs.get('timeout', 60))
 
-
-    def _wbem_request(self, methodname, params):
+    def _wbem_request(self, data, parser=None):
         """Send XML data over HTTP to the specified url. Return the
-        response in XML.  Uses Python's build-in urllib2.
+        response in XML.  Uses Python's build-in httplib.
         """
 
-        data = XML_REQ%(methodname,
-            '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')), params)
-
-        headers = { 'Content-type': 'application/xml; charset="utf-8"',
-                    'Content-length': len(data),
-                    'CIMOperation': 'MethodCall',
-                    'CIMMethod': methodname,
-                    'CIMObject': self._namespace}
-
         oldtimeout = None
-        request = urllib2.Request(self._url, data, headers)
-        if StrictVersion(urllib2.__version__) < '2.6':
-            request.set_proxy = lambda *args: None
-            openerArgs = (request, None)
+        if self._timeout:
             oldtimeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(self._timeout)
-        else:
-            openerArgs = (request, None, self._timeout)
-
-        tryLimit = 5
-        xml_repl = None
+            if oldtimeout != self._timeout:
+                socket.setdefaulttimeout(self._timeout)
+        parsed = False
         try:
-            while not xml_repl:
-                tryLimit -= 1
+            try:
                 try:
-                    xml_repl = self._urlOpener.open(*openerArgs)
-                except urllib2.HTTPError, arg:
-                    if not (arg.code in [401, 504] and tryLimit > 0):
-                        raise InterfaceError('HTTP error: %s' % arg.code)
-                except urllib2.URLError, arg:
-                    if not (arg.reason[0] in [32, 104] and tryLimit > 0):
-                        raise InterfaceError('socket error: %s' % arg.reason)
-        finally:
-            if oldtimeout:
-                socket.setdefaulttimeout(oldtimeout)
-        return xml_repl
+                    if not getattr(self._connection, 'sock', None):
+                        self._connection.connect()
+                    self._connection.request('POST','/cimom',data,self._headers)
+                except socket.error, arg:
+                    if arg[0] != 104 and arg[0] != 32:
+                        raise
 
+                response = self._connection.getresponse()
+                xml_resp = response.read()
+
+                if response.status != 200:
+                    if response.getheader('CIMError', None) is not None and \
+                        response.getheader('PGErrorDetail', None) is not None:
+                            import urllib
+                            raise InterfaceError("CIMError: (%s, '%s')" %
+                                (response.getheader('CIMError'),
+                                 urllib.unquote(response.getheader('PGErrorDetail'))))
+                    raise InterfaceError('HTTP error: %s'%str((response.status,
+                                                            response.reason)))
+
+                if parser:
+                    inpsrc = xmlreader.InputSource()
+                    inpsrc.setByteStream(StringIO(xml_resp))
+                    parser.parse(inpsrc)
+                parsed = True
+            except SAXParseException, e:
+                raise OperationalError("XML parsing error: %s" % e.getMessage())
+            except httplib.BadStatusLine, arg:
+                raise InterfaceError("The web server returned a bad status line: '%s'" % arg)
+            except socket.error, arg:
+                raise InterfaceError("Socket error: %s" % (arg,))
+            except socket.sslerror, arg:
+                raise InterfaceError("SSL error: %s" % (arg,))
+        finally:
+            if oldtimeout and oldtimeout != socket.getdefaulttimeout():
+                socket.setdefaulttimeout(oldtimeout)
+            if not parsed:
+                if hasattr(parser, "_cont_handler"):
+                    if parser._cont_handler._cur._parser == parser:
+                        cursor = parser._cont_handler._cur
+                        cursor._parser = None
+                    else:
+                        parser = None
+        return xml_resp
 
     def __del__(self):
         self.close()
@@ -671,7 +694,12 @@ class pywbemCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        return
+        if self._connection is not None:
+            if getattr(self._connection, 'sock', None):
+                self._connection.sock.shutdown(socket.SHUT_RDWR)
+            if hasattr(self._connection, 'close'):
+                self._connection.close()
+            self._connection = None
 
     def commit(self):
         """

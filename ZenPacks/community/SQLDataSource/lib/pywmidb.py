@@ -20,10 +20,9 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.4.9'
+__version__ = '1.5.0'
 
 from datetime import datetime, timedelta
-from distutils.version import StrictVersion
 from threading import Lock
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
@@ -43,26 +42,35 @@ from pysamba.talloc import *
 from pysamba.rpc.credentials import CRED_SPECIFIED
 from pysamba.version import VERSION as PSVERSION
 
-library.dcom_client_init.restype = c_void_p
-library.dcom_client_init.argtypes = [POINTER(com_context), c_void_p]
-library.com_init_ctx.restype = WERROR
-library.IWbemServices_ExecQuery.restype = WERROR
-#library.IEnumWbemClassObject_Reset.restype = WERROR
-library.IUnknown_Release.restype = WERROR
+from distutils.version import StrictVersion
+if not getattr(WbemQualifier, "_fields_", None):
+    if StrictVersion(PSVERSION) < '1.3.10':
+        library.WBEM_ConnectServer.restype = WERROR
+        library.IEnumWbemClassObject_SmartNext.restype = WERROR
+        class IEnumWbemClassObject(Structure): pass
+        class IWbemClassObject(Structure): pass
+        class IWbemContext(Structure): pass
 
-if StrictVersion(PSVERSION) < '1.3.10':
-    library.WBEM_ConnectServer.restype = WERROR
-    library.IEnumWbemClassObject_SmartNext.restype = WERROR
-    class IEnumWbemClassObject(Structure): pass
-    class IWbemClassObject(Structure): pass
-    class IWbemContext(Structure): pass
+    library.dcom_client_init.restype = c_void_p
+    library.dcom_client_init.argtypes = [POINTER(com_context), c_void_p]
+    library.com_init_ctx.restype = WERROR
+    library.IWbemServices_ExecQuery.restype = WERROR
+    #library.IEnumWbemClassObject_Reset.restype = WERROR
+    library.IUnknown_Release.restype = WERROR
+    library.dcom_proxy_IUnknown_init.restype = WERROR
+    library.dcom_proxy_IWbemLevel1Login_init.restype = WERROR
+    library.dcom_proxy_IWbemServices_init.restype = WERROR
+    library.dcom_proxy_IEnumWbemClassObject_init.restype = WERROR
+    library.dcom_proxy_IRemUnknown_init.restype = WERROR
+    library.dcom_proxy_IWbemFetchSmartEnum_init.restype = WERROR
+    library.dcom_proxy_IWbemWCOSmartEnum_init.restype = WERROR
 
-WbemQualifier._fields_ = [
-    ('name', CIMSTRING),
-    ('flavors', uint8_t),
-    ('cimtype', uint32_t),
-    ('value', CIMVAR),
-    ]
+    WbemQualifier._fields_ = [
+        ('name', CIMSTRING),
+        ('flavors', uint8_t),
+        ('cimtype', uint32_t),
+        ('value', CIMVAR),
+        ]
 
 class DBAPITypeObject:
     def __init__(self,*values):
