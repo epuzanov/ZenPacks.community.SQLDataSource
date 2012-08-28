@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.2.0'
+__version__ = '2.2.1'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
@@ -218,8 +218,8 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module and connections may be shared
-threadsafety = 3
+# module may be shared
+threadsafety = 1
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -624,9 +624,9 @@ class pywbemCnx:
         else:
             self._connection = httplib.HTTPConnection(**conkwargs)
         if hasattr(self._connection, 'timeout'):
-            self._connection.timeout = float(kwargs.get('timeout', 60))
+            self._connection.timeout = float(kwargs.get('timeout', 120))
         else:
-            self._timeout = float(kwargs.get('timeout', 60))
+            self._timeout = float(kwargs.get('timeout', 120))
 
     def _wbem_request(self, data, parser=None):
         """Send XML data over HTTP to the specified url. Return the
@@ -697,6 +697,8 @@ class pywbemCnx:
         if self._connection is not None:
             if getattr(self._connection, 'sock', None):
                 self._connection.sock.shutdown(socket.SHUT_RDWR)
+                self._connection.sock.close()
+            self._connection.sock = None
             if hasattr(self._connection, 'close'):
                 self._connection.close()
             self._connection = None
