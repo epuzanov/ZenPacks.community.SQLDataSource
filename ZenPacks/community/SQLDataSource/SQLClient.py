@@ -12,12 +12,10 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.10 2012/08/25 22:46:58 egor Exp $"""
+$Id: SQLClient.py,v 3.11 2012/09/13 18:12:41 egor Exp $"""
 
-__version__ = "$Revision: 3.10 $"[11:-2]
+__version__ = "$Revision: 3.11 $"[11:-2]
 
-if __name__ == "__main__":
-    import pysamba.twisted.reactor
 import logging
 log = logging.getLogger("zen.SQLClient")
 
@@ -259,14 +257,7 @@ class adbapiExecutor(object):
                 self._connection.close()
                 self._connection = None
         self._cs = task.connectionString
-        if task.connectionString.startswith("'pywmidb'"):
-            try:
-                from pysambaClient import pysambaClient
-                self._connection = pysambaClient(task.connectionString)
-            except ImportError:
-                self._connection = adbapiClient(task.connectionString)
-        else:
-            self._connection = adbapiClient(task.connectionString)
+        self._connection = adbapiClient(task.connectionString)
         return defer.maybeDeferred(self._connection.connect)
 
     def _connected(self, connection, task):
