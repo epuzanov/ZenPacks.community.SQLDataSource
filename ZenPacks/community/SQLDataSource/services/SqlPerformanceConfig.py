@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.4 2012/06/23 21:32:11 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.5 2012/09/13 19:47:50 egor Exp $"""
 
-__version__ = "$Revision: 3.4 $"[11:-2]
+__version__ = "$Revision: 3.5 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -42,7 +42,7 @@ class SqlPerformanceConfig(CollectorConfigService):
         CollectorConfigService.__init__(self, dmd, instance)
         self.evtOrgNames = dmd.Events.Status.getOrganizerNames()
 
-    def _getDsDatapoints(self, comp, ds, perfServer):
+    def _getDsDatapoints(self, comp, ds, perfServer, dpnames):
         """
         Given a component a data source, gather its data points
         """
@@ -55,6 +55,7 @@ class SqlPerformanceConfig(CollectorConfigService):
             component_name = getattr(comp, 'id', '')
         basepath = comp.rrdPath()
         for dp in ds.getRRDDataPoints():
+            dpnames.add(dp.id)
             alias = (dp.aliases() or [dp])[0]
             formula = getattr(alias, 'formula', None)
             dpc = DataPointConfig()
@@ -112,6 +113,7 @@ class SqlPerformanceConfig(CollectorConfigService):
             self._sendQueryEvent(device.id, details)
 
     def _getComponentConfig(self, comp, device, perfServer, queries):
+        thresholds = []
         if comp.__class__.__name__ in self.evtOrgNames:
             eventClass = comp.__class__.__name__
         elif comp.meta_type in self.evtOrgNames:
@@ -119,6 +121,7 @@ class SqlPerformanceConfig(CollectorConfigService):
         else:
             eventClass = 'PyDBAPI'
         for templ in comp.getRRDTemplates():
+            dpnames = set()
             for ds in templ.getRRDDataSources():
                 if not (isinstance(ds, DataSource) and ds.enabled): continue
                 query = DataSourceConfig()
@@ -128,7 +131,7 @@ class SqlPerformanceConfig(CollectorConfigService):
                 query.eventKey = ds.eventKey or ds.id
                 query.severity = ds.severity
                 query.ds = ds.titleOrId()
-                query.points = self._getDsDatapoints(comp, ds, perfServer)
+                query.points = self._getDsDatapoints(comp,ds,perfServer,dpnames)
                 if ds.eventClass:
                     query.eventClass = ds.eventClass
                 else:
@@ -161,7 +164,11 @@ class SqlPerformanceConfig(CollectorConfigService):
                 self.enrich(query, templ, ds)
                 queries.add(query)
 
-        return comp.getThresholdInstances(self.dsType)
+            for threshold in templ.thresholds():
+                if threshold.enabled and dpnames & set(threshold.dsnames):
+                    thresholds.append(threshold.createThresholdInstance(comp))
+
+        return thresholds
 
     def enrich(self, query, template, ds):
         """
