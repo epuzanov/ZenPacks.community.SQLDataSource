@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.5 2012/09/13 19:47:50 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.6 2012/09/16 16:40:40 egor Exp $"""
 
-__version__ = "$Revision: 3.5 $"[11:-2]
+__version__ = "$Revision: 3.6 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -55,7 +55,7 @@ class SqlPerformanceConfig(CollectorConfigService):
             component_name = getattr(comp, 'id', '')
         basepath = comp.rrdPath()
         for dp in ds.getRRDDataPoints():
-            dpnames.add(dp.id)
+            dpnames.add(dp.name())
             alias = (dp.aliases() or [dp])[0]
             formula = getattr(alias, 'formula', None)
             dpc = DataPointConfig()
