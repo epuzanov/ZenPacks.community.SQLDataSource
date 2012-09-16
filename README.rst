@@ -18,8 +18,8 @@ Zenoss
 ------
 
 You must first have, or install, Zenoss 2.5.2 or later. This ZenPack was tested 
-against Zenoss 2.5.2 and Zenoss 3.2. You can download the free Core version of 
-Zenoss from http://community.zenoss.org/community/download
+against Zenoss 2.5.2, Zenoss 3.2 and Zenoss 4.2. You can download the free Core 
+version of Zenoss from http://community.zenoss.org/community/download
 
 
 Installation
