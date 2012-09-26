@@ -13,9 +13,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.9 2012/08/25 23:03:05 egor Exp $"""
+$Id: zenperfsql.py,v 3.10 2012/09/26 21:16:47 egor Exp $"""
 
-__version__ = "$Revision: 3.9 $"[11:-2]
+__version__ = "$Revision: 3.10 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -479,7 +479,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                         datasource.cycleTime,
                         dp.rrdMin,
                         dp.rrdMax]
-                if int(ZVERSION[0]) > 2:
+                if ZVERSION > '3.1.0':
                     threshData = {
                         'eventKey': datasource.getEventKey(dp),
                         'component': dp.component,
