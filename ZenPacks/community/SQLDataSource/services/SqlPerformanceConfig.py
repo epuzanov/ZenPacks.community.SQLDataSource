@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.6 2012/09/16 16:40:40 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.7 2012/10/11 20:03:07 egor Exp $"""
 
-__version__ = "$Revision: 3.6 $"[11:-2]
+__version__ = "$Revision: 3.7 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -42,7 +42,7 @@ class SqlPerformanceConfig(CollectorConfigService):
         CollectorConfigService.__init__(self, dmd, instance)
         self.evtOrgNames = dmd.Events.Status.getOrganizerNames()
 
-    def _getDsDatapoints(self, comp, ds, perfServer, dpnames):
+    def _getDsDatapoints(self, comp, ds, perfServer, dpnames, sql=''):
         """
         Given a component a data source, gather its data points
         """
@@ -56,13 +56,15 @@ class SqlPerformanceConfig(CollectorConfigService):
         basepath = comp.rrdPath()
         for dp in ds.getRRDDataPoints():
             dpnames.add(dp.name())
-            alias = (dp.aliases() or [dp])[0]
-            formula = getattr(alias, 'formula', None)
             dpc = DataPointConfig()
             dpc.id = dp.id
-            if formula:
+            for alias in dp.aliases():
+                aliasId = alias.id.strip().lower()
+                if dpc.alias and aliasId not in sql: continue
+                dpc.alias = aliasId
+                formula = getattr(alias, 'formula', None)
+                if not formula: continue
                 dpc.expr=talesEval("string:%s"%formula,comp,extra={'now':'now'})
-            dpc.alias = alias.id.strip().lower()
             dpc.component = component_name
             dpc.rrdPath = "/".join((basepath, dp.name()))
             dpc.rrdType = dp.rrdtype
@@ -131,7 +133,6 @@ class SqlPerformanceConfig(CollectorConfigService):
                 query.eventKey = ds.eventKey or ds.id
                 query.severity = ds.severity
                 query.ds = ds.titleOrId()
-                query.points = self._getDsDatapoints(comp,ds,perfServer,dpnames)
                 if ds.eventClass:
                     query.eventClass = ds.eventClass
                 else:
@@ -161,6 +162,8 @@ class SqlPerformanceConfig(CollectorConfigService):
                     self._sendQueryEvent('localhost', details)
                     continue
 
+                query.points = self._getDsDatapoints(comp, ds, perfServer,
+                                                    dpnames, query.sqlp.lower())
                 self.enrich(query, templ, ds)
                 queries.add(query)
 
