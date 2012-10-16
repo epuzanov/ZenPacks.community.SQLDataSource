@@ -15,9 +15,9 @@ __doc__ = """SqlPerformanceConfig
 
 Provides configuration to zenperfsql clients.
 
-$Id: SqlPerformanceConfig.py,v 3.7 2012/10/11 20:03:07 egor Exp $"""
+$Id: SqlPerformanceConfig.py,v 3.8 2012/10/16 16:30:47 egor Exp $"""
 
-__version__ = "$Revision: 3.7 $"[11:-2]
+__version__ = "$Revision: 3.8 $"[11:-2]
 
 import logging
 log = logging.getLogger('zen.HubService.SqlPerformanceConfig')
@@ -60,11 +60,13 @@ class SqlPerformanceConfig(CollectorConfigService):
             dpc.id = dp.id
             for alias in dp.aliases():
                 aliasId = alias.id.strip().lower()
-                if dpc.alias and aliasId not in sql: continue
+                if dpc.alias and ' %s '%aliasId not in sql: continue
                 dpc.alias = aliasId
                 formula = getattr(alias, 'formula', None)
                 if not formula: continue
                 dpc.expr=talesEval("string:%s"%formula,comp,extra={'now':'now'})
+            if not dpc.alias:
+                dpc.alias = dp.id.strip().lower()
             dpc.component = component_name
             dpc.rrdPath = "/".join((basepath, dp.name()))
             dpc.rrdType = dp.rrdtype
@@ -163,7 +165,7 @@ class SqlPerformanceConfig(CollectorConfigService):
                     continue
 
                 query.points = self._getDsDatapoints(comp, ds, perfServer,
-                                                    dpnames, query.sqlp.lower())
+                                dpnames, query.sqlp.replace(',', ' ').lower())
                 self.enrich(query, templ, ds)
                 queries.add(query)
 
