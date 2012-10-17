@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.12 2012/10/16 16:32:26 egor Exp $"""
+$Id: SQLClient.py,v 3.13 2012/10/17 18:04:07 egor Exp $"""
 
-__version__ = "$Revision: 3.12 $"[11:-2]
+__version__ = "$Revision: 3.13 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -309,10 +309,9 @@ class adbapiExecutor(object):
         if self._running > 0:
             self._running -= 1
         if not self._taskQueue and self._running < 1:
-            if not getattr(self._connection, 'ready', None):
-                if hasattr(self._connection, 'close'):
-                    self._connection.close()
-                self._connection = None
+            if hasattr(self._connection, 'close'):
+                self._connection.close()
+            self._connection = None
             self._cs = None
         reactor.callLater(0, self._runTask)
         task.result = result
