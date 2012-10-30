@@ -13,9 +13,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.10 2012/09/26 21:16:47 egor Exp $"""
+$Id: zenperfsql.py,v 3.11 2012/10/30 20:05:12 egor Exp $"""
 
-__version__ = "$Revision: 3.10 $"[11:-2]
+__version__ = "$Revision: 3.11 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -245,16 +245,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
 
         self._dataService = zope.component.queryUtility(IDataService)
         self._eventService = zope.component.queryUtility(IEventService)
-
         self._preferences = zope.component.queryUtility(ICollectorPreferences,
                                                         COLLECTOR_NAME)
         self._lastErrorMsg = ''
-
         self._executor = None
-
         self._datasources = taskConfig.datasources
-        self._dbapiName = taskConfig.datasources[0].connectionString.split(',',
-                                                        1)[0].strip('\'"')
+
         self.pool = getPool('adbapi executors')
         self.executed = 0
 
@@ -270,7 +266,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Get the key under which the client should be stored in the pool.
         """
-        return self._dbapiName
+        poolKey = self._datasources[0].connectionString
+        if poolKey.startswith("'pywmidb'"):
+            poolKey = 'pywmidb'
+        return poolKey
 
     def _cleanUpPool(self):
         """
