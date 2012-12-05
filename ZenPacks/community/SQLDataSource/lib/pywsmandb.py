@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.2.1'
+__version__ = '2.2.2'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
@@ -249,8 +249,8 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared
-threadsafety = 1
+# module and connection may be shared
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'

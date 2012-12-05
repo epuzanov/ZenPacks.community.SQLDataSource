@@ -13,9 +13,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.11 2012/10/30 20:05:12 egor Exp $"""
+$Id: zenperfsql.py,v 3.12 2012/12/05 21:03:47 egor Exp $"""
 
-__version__ = "$Revision: 3.11 $"[11:-2]
+__version__ = "$Revision: 3.12 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -44,13 +44,10 @@ from Products.ZenCollector.interfaces import ICollectorPreferences,\
 from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         SimpleTaskSplitter,\
                                         TaskStates
-from ZenPacks.community.SQLDataSource.SQLClient import  adbapiExecutor, \
+from ZenPacks.community.SQLDataSource.SQLClient import  getPool, \
+                                                        adbapiClient,\
                                                         DataSourceConfig,\
                                                         DataPointConfig
-try:
-    from Products.ZenCollector.pools import getPool
-except:
-    from ZenPacks.community.SQLDataSource.SQLClient import getPool
 from Products.ZenEvents import Event
 
 from Products.DataCollector import Plugins
@@ -64,6 +61,7 @@ unused(DeviceProxy)
 
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
+ADBAPI_POOL = {}
 
 #
 # RPN reverse calculation
@@ -200,7 +198,11 @@ class SqlPerCycletimeTaskSplitter(SubConfigurationTaskSplitter):
     subconfigName = 'datasources'
 
     def makeConfigKey(self, config, subconfig):
-        return (config.id,subconfig.cycleTime,hash(subconfig.connectionString))
+        return (config.id, subconfig.cycleTime,
+                hash(' '.join((subconfig.connectionString,
+                            subconfig.sqlp,
+                            str(subconfig.columns),
+                            str(subconfig.timeout)))))
 
 
 class SqlPerformanceCollectionTask(ObservableMixin):
@@ -248,10 +250,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self._preferences = zope.component.queryUtility(ICollectorPreferences,
                                                         COLLECTOR_NAME)
         self._lastErrorMsg = ''
-        self._executor = None
         self._datasources = taskConfig.datasources
-
-        self.pool = getPool('adbapi executors')
+        self._connectionString = taskConfig.datasources[0].connectionString
+        self._connection = None
         self.executed = 0
 
     def __str__(self):
@@ -266,19 +267,19 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Get the key under which the client should be stored in the pool.
         """
-        poolKey = self._datasources[0].connectionString
-        if poolKey.startswith("'pywmidb'"):
-            poolKey = 'pywmidb'
-        return poolKey
+        poolKey = self._connectionString
+        return hash(poolKey)
 
     def _cleanUpPool(self):
         """
         Close the connection currently associated with this task.
         """
         poolkey = self._getPoolKey()
-        if poolkey in self.pool and self.pool[poolkey]._running < 1:
-            self.pool[poolkey] = None
-            del self.pool[poolkey]
+        if hasattr(self._connection, "close"):
+            self._connection.close()
+            self._connection = None
+        if poolkey in ADBAPI_POOL:
+            del ADBAPI_POOL[poolkey]
 
     def doTask(self):
         """
@@ -290,8 +291,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         # See if we need to connect first before doing any collection
         d = defer.maybeDeferred(self._connect)
-        d.addCallbacks(self._connectCallback, self._failure)
+        d.addCallback(self._connectCallback)
         d.addCallback(self._fetchPerf)
+        d.addErrback(self._failure)
 
         # Call _finished for both success and error scenarios
         d.addBoth(self._finished)
@@ -301,31 +303,26 @@ class SqlPerformanceCollectionTask(ObservableMixin):
 
     def _connect(self):
         """
-        check if executor for specific dbapi in pool if not create a executor.
+        check if ADB-API ConnectionPool for specific connection string in
+        ADBAPI_POOL dictionary, if not create a new ConnectionPool.
         """
-
         poolKey = self._getPoolKey()
-        executor = self.pool.get(poolKey, None)
-        if executor is None:
+        if getattr(self._connection, "ready", False):
+            return
+        connection = ADBAPI_POOL.get(poolKey)
+        if connection is None:
             self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-            log.debug("Creating %s executor object", poolKey)
-            executor = adbapiExecutor()
-            self.pool[poolKey] = executor
-        self._executor = executor
-        return executor
+            log.debug("Creating %s ConnectionPool object", poolKey)
+            connection = adbapiClient(self._connectionString)
+            connection.connect()
+            ADBAPI_POOL[poolKey] = connection
+        self._connection = connection
 
     def _close(self):
         """
-        If a local datasource executor, do nothing.
-
-        If an SSH datasource executor, relinquish a connection to the remote device.
+        do nothing.
         """
-        if self._executor and self._executor._running < 1:
-            self._executor =  None
-            poolkey = self._getPoolKey()
-            if poolkey in self.pool:
-                self.pool[poolkey] = None
-                del self.pool[poolkey]
+        return
 
     def _failure(self, reason):
         """
@@ -335,6 +332,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @type reason: Twisted error instance
         """
         msg = reason.getErrorMessage()
+        reason.cleanFailure()
         if not msg: # Sometimes we get blank error messages
             msg = reason.__class__
         msg = '%s %s' % (self._devId, msg)
@@ -358,6 +356,40 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         log.debug("Connected to %s [%s]", self._devId, self._manageIp)
         return result
 
+    def _runQuery(self, txn, sql, columns, timeout):
+        """
+        execute a sql query.
+
+        @param txn: database cursor
+        @type txn: dbapi.cursor or adbapi.Transaction
+        @param sql: sql operation
+        @type sql: string
+        @param columns: columns to return
+        @type columns: list
+        @param timeout: timeout in seconds
+        @type timeout: int
+        """
+        for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
+            if not q.strip(): continue
+            txn.execute(q.strip())
+        if not txn.description:
+            return res
+        header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
+        if set(columns).intersection(set(header)):
+            varVal = False
+        else:
+            res.append({})
+            varVal = True
+        rows = txn.fetchmany()
+        while rows:
+            for row in rows:
+                if varVal:
+                    res[0][str(row[0]).lower()] = row[-1]
+                else:
+                    res.append(dict(zip(header, row)))
+            rows = txn.fetchmany()
+        return res
+
     def _fetchPerf(self, ignored):
         """
         Get performance data for all the monitored components on a device
@@ -367,24 +399,11 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         self.state = SqlPerformanceCollectionTask.STATE_FETCH_DATA
 
-        # Bundle up the list of tasks
-        deferredCmds = []
-        for datasource in self._datasources:
-            log.debug("Datasource %s %squery:'%s'", datasource.name,
-                self._preferences.options.showconnectionstring and \
-                "connection string: '%s', " % datasource.connectionString or "",
-                datasource.sql)
-            datasource.deviceConfig = self._device
-            task = self._executor.submit(datasource)
-            task.addBoth(self._processDatasourceResults)
-            deferredCmds.append(task)
-
-        # Run the tasks
-        dl = defer.DeferredList(deferredCmds, consumeErrors=True)
-        dl.addCallback(self._parseResults)
-        dl.addCallback(self._storeResults)
-        dl.addCallback(self._updateStatus)
-        return dl
+        d = self._connection.query(self._datasources[0])
+        d.addCallback(self._parseResults)
+        d.addCallback(self._storeResults)
+        d.addCallback(self._updateStatus)
+        return d
 
     def _processDatasourceResults(self, datasource):
         """
@@ -393,17 +412,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @parameter datasource: results rows
         @type datasource: DataSourceConfig object
         """
-        result = ParsedResults()
-        if isinstance(datasource.result, Failure):
-            msg = datasource.result.getErrorMessage()
-            datasource.result.cleanFailure()
-            datasource.result = None
-            ev = self._makeQueryEvent(datasource, msg)
-            if ev['severity'] not in ('Clear', 'Info', 'Debug'):
-                ev['stderr'] = msg
-            result.events.append(ev)
-            return datasource, result
         msg = 'Datasource %s query completed successfully' % (datasource.name)
+        result = ParsedResults()
         ev = self._makeQueryEvent(datasource, msg, Clear)
         result.events.append(ev)
         for dp in datasource.points:
@@ -444,8 +454,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         datasource.result = None
         return datasource, result
 
-
-    def _parseResults(self, resultList):
+    def _parseResults(self, results):
         """
         Interpret the results retrieved from the commands and pass on
         the datapoint values and events.
@@ -455,8 +464,18 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         self.state = SqlPerformanceCollectionTask.STATE_PARSE_DATA
         parseableResults = []
-        for success, results in resultList:
-            parseableResults.append(results)
+
+        for ds in self._datasources:
+            if ds.keybindings:
+                kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
+                                for k in ds.keybindings.iteritems()])
+                kv = ''.join(kv)
+            else: kc, kv = (), ''
+            ds.result = []
+            for row in results:
+                if kv == ''.join([str(row.get(k) or '').strip() for k in kc]
+                        ).lower(): ds.result.append(row)
+            parseableResults.append(self._processDatasourceResults(ds))
         return parseableResults
 
     def _storeResults(self, resultList):
@@ -544,7 +563,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                     display += '\tconnection string: %s\n'%p._cs
                 elif p._taskQueue:
                     display += '\tconnection string: %s\n'%p._taskQueue[0]._cs
-            display += '\tpool running: %s\n'%getattr(p._connection,'running',False)
+            display += '\tpool running: %s\n'%getattr(p._connection, '_running', 0)
             display += '\ttasks running: %s\n'%p._running
             display += '\ttasks queue: %s\n'%len(p._taskQueue)
             for t in p._taskQueue:

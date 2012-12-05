@@ -3,9 +3,9 @@
 # or saved.  Do not modify them directly here.
 # NB: PACKAGES is deprecated
 NAME = "ZenPacks.community.SQLDataSource"
-VERSION = "2.4.6"
+VERSION = "2.4.7"
 AUTHOR = "Egor Puzanov"
-LICENSE = ""
+LICENSE = "GPLv2"
 NAMESPACE_PACKAGES = ['ZenPacks', 'ZenPacks.community']
 PACKAGES = ['ZenPacks', 'ZenPacks.community', 'ZenPacks.community.SQLDataSource']
 INSTALL_REQUIRES = []

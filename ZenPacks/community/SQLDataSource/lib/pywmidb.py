@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.5.0'
+__version__ = '1.5.1'
 
 from datetime import datetime, timedelta
 from threading import Lock
@@ -149,8 +149,8 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared, but not connections
-threadsafety = 3
+# module and connection may be shared
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'

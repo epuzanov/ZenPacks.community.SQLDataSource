@@ -12,13 +12,13 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 3.2 2012/04/20 00:58:56 egor Exp $"""
+$Id: SQLPlugin.py,v 3.3 2012/12/05 20:39:14 egor Exp $"""
 
-__version__ = "$Revision: 3.2 $"[11:-2]
+__version__ = "$Revision: 3.3 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from Products.ZenUtils.ZenTales import talesEval
-from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
+from ZenPacks.community.SQLDataSource.SQLClient import SQLClient, getPool
 from twisted.internet.defer import Deferred
 
 class SQLPlugin(CollectorPlugin):
@@ -28,6 +28,7 @@ class SQLPlugin(CollectorPlugin):
     """
     transport = "python"
     tables = {}
+    _pool = getPool('modeler devices')
     deviceProperties = CollectorPlugin.deviceProperties  +  ('zWinUser',
                                                             'zWinPassword',
                                                             )
@@ -55,15 +56,17 @@ class SQLPlugin(CollectorPlugin):
 
     def clientFinished(self, client):
         for plugin, results in client.getResults():
-            if plugin == self: break
-        else:
-            results = []
-        client.deferred.callback(results)
-        client = None
+            plugin.deferred.callback(results)
+        poolKey = client.hostname
+        self._pool[poolKey] = None
+        del self._pool[poolKey] 
 
     def collect(self, device, log):
-        deferred = Deferred()
-        cl = SQLClient(device, datacollector=self, plugins=[self])
-        setattr(cl, 'deferred', deferred)
+        self.deferred = Deferred()
+        cl = self._pool.get(device.id)
+        if cl is None:
+            cl = SQLClient(device, datacollector=self)
+            self._pool[device.id] = cl
+        cl.plugins.append(self)
         cl.run()
-        return deferred
+        return self.deferred
