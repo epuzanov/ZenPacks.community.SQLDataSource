@@ -551,10 +551,10 @@ class wsmanCursor(object):
 
         if args != ():
             operation = operation%args[0]
+        operation = operation.encode('unicode-escape')
 
         try:
-            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
-                                            ).replace('\\\\"','\\"')).groups('')
+            props, classname, where = WQLPAT.match(operation).groups('')
         except:
             raise ProgrammingError("Syntax error in the query statement.")
         if where:
@@ -601,6 +601,7 @@ class wsmanCursor(object):
                 self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),
                 ENUM_ACTION_PULL, self._get_parser())
             if self.description: self.rownumber = 0
+
         except InterfaceError, e:
             raise InterfaceError(e)
         except OperationalError, e:
@@ -702,14 +703,12 @@ class wsmanCnx:
     """
 
     def __init__(self, *args, **kwargs):
-        self._connection = None
-        self._timeout = None
-        conkwargs = {}
+        self._timeout = float(kwargs.get('timeout', 120))
         dialect = kwargs.get('dialect', '').upper()
-        scheme = str(kwargs.get('scheme', 'https')).lower()
-        conkwargs = {
+        self._scheme = str(kwargs.get('scheme', 'https')).lower()
+        self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',
-            'port':int(kwargs.get('port', scheme == 'http' and 5985 or 5986))}
+            'port':int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))}
         self._path = kwargs.get('path', '/wsman')
         self._url = '%s://%s:%s%s'%(scheme, conkwargs['host'],
                                     conkwargs['port'], self._path)
@@ -719,17 +718,10 @@ class wsmanCnx:
         if 'user' in kwargs:
             self._headers['Authorization'] = 'Basic %s'%base64.encodestring(
                 '%s:%s'%(kwargs['user'], kwargs.get('password','')))[:-1]
-        if scheme == 'https':
+        if self._scheme == 'https':
             if 'key_file' in kwargs and 'cert_file' in kwargs:
-                conkwargs['key_file'] = kwargs['key_file']
-                conkwargs['cert_file'] = kwargs['cert_file']
-            self._connection = httplib.HTTPSConnection(**conkwargs)
-        else:
-            self._connection = httplib.HTTPConnection(**conkwargs)
-        if hasattr(self._connection, 'timeout'):
-            self._connection.timeout = float(kwargs.get('timeout', 120))
-        else:
-            self._timeout = float(kwargs.get('timeout', 120))
+                self._conkwargs['key_file'] = kwargs['key_file']
+                self._conkwargs['cert_file'] = kwargs['cert_file']
         self._wsm_vendor = ''
         self._fltr={'WQL':WQL_FILTER_TMPL,
                     'CQL':CQL_FILTER_TMPL,
@@ -755,8 +747,14 @@ class wsmanCnx:
         if action:
             headers['SOAPAction'] = action
 
+        if self._scheme == 'https':
+            connection = httplib.HTTPSConnection(**self._conkwargs)
+        else:
+            connection = httplib.HTTPConnection(**self._conkwargs)
         oldtimeout = None
-        if self._timeout:
+        if hasattr(connection, 'timeout'):
+            connection.timeout = self._timeout
+        else:
             oldtimeout = socket.getdefaulttimeout()
             if oldtimeout != self._timeout:
                 socket.setdefaulttimeout(self._timeout)
@@ -764,14 +762,14 @@ class wsmanCnx:
         try:
             try:
                 try:
-                    if not getattr(self._connection, 'sock', None):
-                        self._connection.connect()
-                    self._connection.request('POST', self._path, data, headers)
+                    if not getattr(connection, 'sock', None):
+                        connection.connect()
+                    connection.request('POST', self._path, data, headers)
                 except socket.error, arg:
                     if arg[0] != 104 and arg[0] != 32:
                         raise
 
-                response = self._connection.getresponse()
+                response = connection.getresponse()
                 xml_resp = response.read()
 
                 if xml_resp.find("'", 0, xml_resp.find("\n")) > 0:
@@ -819,14 +817,7 @@ class wsmanCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        if self._connection is not None:
-            if getattr(self._connection, 'sock', None):
-                self._connection.sock.shutdown(socket.SHUT_RDWR)
-                self._connection.sock.close()
-            self._connection.sock = None
-            if hasattr(self._connection, 'close'):
-                self._connection.close()
-            self._connection = None
+        return
 
     def commit(self):
         """

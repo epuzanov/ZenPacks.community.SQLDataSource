@@ -21,6 +21,10 @@ from Products.ZenUtils.ZenTales import talesEval
 from ZenPacks.community.SQLDataSource.SQLClient import SQLClient, getPool
 from twisted.internet.defer import Deferred
 
+SQLCLIENT_POOL = {}
+def getPoola(name, factory=None):
+    return SQLCLIENT_POOL
+
 class SQLPlugin(CollectorPlugin):
     """
     A SQLPlugin defines a native Python collection routine and a parsing

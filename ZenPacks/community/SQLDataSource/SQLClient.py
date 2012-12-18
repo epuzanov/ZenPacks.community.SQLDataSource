@@ -34,9 +34,23 @@ import re
 try:
     from Products.ZenCollector.pools import getPool
 except ImportError:
-    ADBAPIPOOLS = {}
+    ADBAPICLIENT_POOL = {}
+    SQLCLIENT_POOL = {}
     def getPool(name, factory=None):
-        return ADBAPIPOOLS
+        if name == 'adbapi connections':
+            return ADBAPICLIENT_POOL
+        else:
+            return SQLCLIENT_POOL
+
+SEM_POOL = {'pywmidb': defer.DeferredSemaphore(1),
+            'pyisqldb': defer.DeferredSemaphore(1),
+            'pywbemdb': defer.DeferredSemaphore(10),
+            'pywsmandb': defer.DeferredSemaphore(10),
+            'pyodbc': defer.DeferredSemaphore(5),
+            }
+
+def getSemaphore(name):
+    return SEM_POOL.setdefault(name, defer.DeferredSemaphore(2))
 
 class TimeoutError(Exception):
     """
@@ -81,22 +95,29 @@ class adbapiClient(object):
         self._dbapi = None
         self._connection = None
         self.ready = None
-        self._running = 0
-        self._sem = defer.DeferredSemaphore(1)
+        self._running = []
+
+    def _connect(self):
+        args, kwargs = parseConnectionString(self.cs)
+        self._connection = adbapi.ConnectionPool(*args, **kwargs)
+        self._dbapi = self._connection.dbapi
+        if 'cp_min' not in kwargs:
+            self._connection.min = 1
+        if 'cp_max' not in kwargs or self._dbapi in ("pywmidb",):
+            self._connection.max = 1
+        self.ready = True
 
     def connect(self):
+        if self._connection and self._semaphore:
+            return defer.succeed(self)
         try:
-            args, kwargs = parseConnectionString(self.cs)
-            self._connection = adbapi.ConnectionPool(*args, **kwargs)
-            self._connection.min = 1
-            self._connection.max = 1
-            self._dbapi = self._connection.dbapi
-            self.ready = True
+            self._connect()
             return defer.succeed(self)
         except Exception, ex:
             return defer.fail(ex)
 
     def close(self):
+        del self._running[:]
         if self._connection:
             self._connection.close()
             self._connection = None
@@ -174,7 +195,10 @@ class adbapiClient(object):
         @param task: task to run
         @type task: DataSourceConfig
         """
-        return self._sem.run(self._connection.runInteraction, self.runQuery,
+        if not self._connection:
+            self._connect()
+        semaphore = getSemaphore(self._connection.dbapiName)
+        return semaphore.run(self._connection.runInteraction, self.runQuery,
                                         task.sqlp, task.columns, task.timeout)
 
 
@@ -363,12 +387,15 @@ class SQLClient(BaseClient):
             return
         self._running += 1
         dsc = self._taskQueue[0]
-        connection = self._pool.get(dsc.connectionString)
+        poolKey = hash(dsc.connectionString)
+        connection = self._pool.get(poolKey)
         if connection is None:
             connection = adbapiClient(dsc.connectionString)
             connection.connect()
-            self._pool[dsc.connectionString] = connection
-            self._connections.append(dsc.connectionString)
+            self._pool[poolKey] = connection
+            self._connections.append(poolKey)
+        if hash(self) not in connection._running:
+            connection._running.append(hash(self))
         d = connection.query(dsc)
         d.addBoth(self._finished, dsc)
         reactor.callLater(0, self._runTask)
@@ -480,10 +507,12 @@ class SQLClient(BaseClient):
         log.info("SQL client finished collection for %s" % self.hostname)
         for poolKey in self._connections:
             if poolKey not in self._pool: continue
-            if hasattr(self._pool[poolKey], "close"):
-                self._pool[poolKey].close()
-            self._pool[poolKey] = None
-            del self._pool[poolKey]
+            if hash(self) in self._pool[poolKey]._running:
+                self._pool[poolKey]._running.remove(hash(self))
+            if not self._pool[poolKey]._running:
+                if hasattr(self._pool[poolKey], "close"):
+                    self._pool[poolKey].close()
+                del self._pool[poolKey]
         if self.datacollector:
             self.datacollector.clientFinished(self)
 

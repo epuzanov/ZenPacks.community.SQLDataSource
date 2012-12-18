@@ -106,7 +106,7 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         try:
             where = re.compile(' AND ', re.I).sub(',',
                                 sql[where_s:where_e].encode('unicode-escape'))
-            kbs = eval('(lambda **kws:kws)(%s)'%where.decode('unicode-escape'))
+            kbs = eval('(lambda **kws:kws)(%s)'%where)
             FROMPAT = re.compile('[%s]\]?(\s+)FROM\s'%'|'.join(
                                     [(dp.getAliasNames() or [dp.id])[0] \
                                     for dp in self.getRRDDataPoints()]), re.I)

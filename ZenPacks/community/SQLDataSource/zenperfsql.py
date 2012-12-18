@@ -44,10 +44,10 @@ from Products.ZenCollector.interfaces import ICollectorPreferences,\
 from Products.ZenCollector.tasks import SimpleTaskFactory,\
                                         SimpleTaskSplitter,\
                                         TaskStates
-from ZenPacks.community.SQLDataSource.SQLClient import  getPool, \
-                                                        adbapiClient,\
-                                                        DataSourceConfig,\
-                                                        DataPointConfig
+from ZenPacks.community.SQLDataSource.SQLClient import  adbapiClient, \
+                                                        DataSourceConfig, \
+                                                        DataPointConfig, \
+                                                        getPool
 from Products.ZenEvents import Event
 
 from Products.DataCollector import Plugins
@@ -61,7 +61,6 @@ unused(DeviceProxy)
 
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
-ADBAPI_POOL = {}
 
 #
 # RPN reverse calculation
@@ -115,7 +114,7 @@ class SqlPerformanceCollectionPreferences(object):
         self.configurationService = 'ZenPacks.community.SQLDataSource.services.SqlPerformanceConfig'
 
         # Provide a reasonable default for the max number of tasks
-        self.maxTasks = 1
+        self.maxTasks = 10
 
         # Will be filled in based on buildOptions
         self.options = None
@@ -253,6 +252,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self._datasources = taskConfig.datasources
         self._connectionString = taskConfig.datasources[0].connectionString
         self._connection = None
+        self._pool = getPool('adbapi connections')
         self.executed = 0
 
     def __str__(self):
@@ -274,12 +274,18 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Close the connection currently associated with this task.
         """
-        poolkey = self._getPoolKey()
-        if hasattr(self._connection, "close"):
-            self._connection.close()
+        if self.name in getattr(self._connection, "_running", []):
+            self._connection._running.remove(self.name)
+        if getattr(self._connection, "_running", []):
             self._connection = None
-        if poolkey in ADBAPI_POOL:
-            del ADBAPI_POOL[poolkey]
+        else:
+            self._connection = None
+            poolKey = self._getPoolKey()
+            if poolKey in self._pool:
+                connection = self._pool.pop(poolKey)
+                if hasattr(connection, "close"):
+                    connection.close()
+                    del connection
 
     def doTask(self):
         """
@@ -291,7 +297,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         # See if we need to connect first before doing any collection
         d = defer.maybeDeferred(self._connect)
-        d.addCallback(self._connectCallback)
         d.addCallback(self._fetchPerf)
         d.addErrback(self._failure)
 
@@ -304,24 +309,30 @@ class SqlPerformanceCollectionTask(ObservableMixin):
     def _connect(self):
         """
         check if ADB-API ConnectionPool for specific connection string in
-        ADBAPI_POOL dictionary, if not create a new ConnectionPool.
+        pool dictionary, if not create a new ConnectionPool.
         """
-        poolKey = self._getPoolKey()
-        if getattr(self._connection, "ready", False):
+        self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
+        if self.name in getattr(self._connection, "_running", []):
             return
-        connection = ADBAPI_POOL.get(poolKey)
-        if connection is None:
-            self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-            log.debug("Creating %s ConnectionPool object", poolKey)
-            connection = adbapiClient(self._connectionString)
-            connection.connect()
-            ADBAPI_POOL[poolKey] = connection
-        self._connection = connection
+        if not self._connection:
+            poolKey = self._getPoolKey()
+            connection = self._pool.get(poolKey)
+            if connection is None:
+                log.debug("Creating ConnectionPool: %s%s", poolKey,
+                    self._preferences.options.showconnectionstring and \
+                    ", connection string: %s"%self._connectionString or "")
+                connection = adbapiClient(self._connectionString)
+                connection.connect()
+                self._pool[poolKey] = connection
+            self._connection = connection
+        self._connection._running.append(self.name)
 
     def _close(self):
         """
         do nothing.
         """
+        if self.name in getattr(self._connection, "_running", []):
+            self._connection._running.remove(self.name)
         return
 
     def _failure(self, reason):
@@ -348,13 +359,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                                      summary=msg,
                                      severity=Event.Error)
         return reason
-
-    def _connectCallback(self, result):
-        """
-        Callback called after a successful connect to the remote device.
-        """
-        log.debug("Connected to %s [%s]", self._devId, self._manageIp)
-        return result
 
     def _runQuery(self, txn, sql, columns, timeout):
         """
@@ -399,6 +403,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         self.state = SqlPerformanceCollectionTask.STATE_FETCH_DATA
 
+        log.debug("Task %s: Pool: %s Query: %s", self.name, self._getPoolKey(),
+                                                    self._datasources[0].sqlp)
         d = self._connection.query(self._datasources[0])
         d.addCallback(self._parseResults)
         d.addCallback(self._storeResults)
@@ -473,8 +479,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             else: kc, kv = (), ''
             ds.result = []
             for row in results:
-                if kv == ''.join([str(row.get(k) or '').strip() for k in kc]
-                        ).lower(): ds.result.append(row)
+                if ''.join([str(row.get(k) or '').strip() for k in kc]
+                    ).lower() != kv: continue
+                ds.result.append(row)
             parseableResults.append(self._processDatasourceResults(ds))
         return parseableResults
 
@@ -550,24 +557,17 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         # Return the result so the framework can track success/failure
         return result
 
-    def displayStatistics(self):
+    def displayStatistics1(self):
         """
         Called by the collector framework scheduler, and allows us to
         see how each task is doing.
         """
-        display = "Active SQL Pools: %s\n"%len(self.pool)
-        for n, p in self.pool.iteritems():
-            display += '%s\n'%n
-            if 0 < log.getEffectiveLevel() < 11:
-                if p._cs:
-                    display += '\tconnection string: %s\n'%p._cs
-                elif p._taskQueue:
-                    display += '\tconnection string: %s\n'%p._taskQueue[0]._cs
-            display += '\tpool running: %s\n'%getattr(p._connection, '_running', 0)
-            display += '\ttasks running: %s\n'%p._running
-            display += '\ttasks queue: %s\n'%len(p._taskQueue)
-            for t in p._taskQueue:
-                display += '\t\t%s\n'%t._sql
+        display = "Active SQL Pools: %s\n"%len(self._pool)
+        poolKey = self._getPoolKey()
+        connection = self._pool.get(poolKey)
+        for n, p in self._pool.iteritems():
+            display += 'pool: %s\n'%n
+            display += '\ttasks running: %s\n'%'\n\t\t'.join(p._running)
         return display
 
 

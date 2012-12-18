@@ -23,7 +23,6 @@ __author__ = "Egor Puzanov"
 __version__ = '1.5.1'
 
 from datetime import datetime, timedelta
-from threading import Lock
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -71,6 +70,18 @@ if not getattr(WbemQualifier, "_fields_", None):
         ('cimtype', uint32_t),
         ('value', CIMVAR),
         ]
+
+if not library.lp_loaded():
+    library.lp_load()
+    library.dcerpc_init()
+    library.dcerpc_table_init()
+    library.dcom_proxy_IUnknown_init()
+    library.dcom_proxy_IWbemLevel1Login_init()
+    library.dcom_proxy_IWbemServices_init()
+    library.dcom_proxy_IEnumWbemClassObject_init()
+    library.dcom_proxy_IRemUnknown_init()
+    library.dcom_proxy_IWbemFetchSmartEnum_init()
+    library.dcom_proxy_IWbemWCOSmartEnum_init()
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -187,6 +198,16 @@ class ProgrammingError(DatabaseError):
 class NotSupportedError(DatabaseError):
     pass
 
+#import threading
+#LOCK = threading.Lock()
+class noLock:
+    def acquire(self):
+        return
+    def release(self):
+        return
+LOCK = noLock()
+def Lock():
+    return LOCK
 
 ### cursor object
 
@@ -318,14 +339,14 @@ class wmiCursor(object):
 
         if args != ():
             operation = operation%args[0]
+        operation = operation.encode('unicode-escape')
 
         ocount = 0
         self._pEnum = POINTER(IEnumWbemClassObject)()
         objs = None
         objs = (POINTER(WbemClassObject) * 1)()
         try:
-            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
-                                            ).replace('\\\\"','\\"')).groups('')
+            props, classname, where = WQLPAT.match(operation).groups('')
             if where:
                 try:
                     self._kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(
@@ -390,11 +411,6 @@ class wmiCursor(object):
             pdict.clear()
             if self.description: self.rownumber = 0
 
-        except WError, e:
-            self._pEnum = None
-            if ocount != 0: talloc_free(objs[0])
-            self._release()
-            raise OperationalError(e)
         except Exception, e:
             self._pEnum = None
             if ocount != 0: talloc_free(objs[0])
@@ -479,9 +495,6 @@ class wmiCursor(object):
                     self.rownumber += 1
             return results
 
-        except WError, e:
-            self._release()
-            raise OperationalError(e)
         except Exception, e:
             self._release()
             raise OperationalError(e)
@@ -539,17 +552,6 @@ class pysambaCnx:
         try:
             self._lock.acquire()
             try:
-                if not library.lp_loaded():
-                    library.lp_load()
-                    library.dcerpc_init()
-                    library.dcerpc_table_init()
-                    library.dcom_proxy_IUnknown_init()
-                    library.dcom_proxy_IWbemLevel1Login_init()
-                    library.dcom_proxy_IWbemServices_init()
-                    library.dcom_proxy_IEnumWbemClassObject_init()
-                    library.dcom_proxy_IRemUnknown_init()
-                    library.dcom_proxy_IWbemFetchSmartEnum_init()
-                    library.dcom_proxy_IWbemWCOSmartEnum_init()
 
                 library.com_init_ctx(byref(self._ctx), None)
 
@@ -558,10 +560,6 @@ class pysambaCnx:
                 library.cli_credentials_parse_string(cred, creds,CRED_SPECIFIED)
                 library.dcom_client_init(self._ctx, cred)
                 library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
-
-            except WError, e:
-                self.close()
-                raise InterfaceError(e)
 
             except Exception, e:
                 self.close()
@@ -590,10 +588,6 @@ class pysambaCnx:
                             POINTER(IWbemContext)(),               # wbem_ctx 
                             byref(self._pWS))                      # services 
                 WERR_CHECK(result, self._host, "Connect")
-
-            except WError, e:
-                self.close()
-                raise InterfaceError(e)
 
             except Exception, e:
                 self.close()
@@ -632,10 +626,6 @@ class pysambaCnx:
                 WERR_CHECK(result, self._host, "Retrieve result data.")
                 return ocount.value
 
-            except WError, e:
-                cursor._pEnum = None
-                if ocount.value != 0: talloc_free(objs[0])
-                raise InterfaceError(e)
             except Exception, e:
                 cursor._pEnum = None
                 if ocount.value != 0: talloc_free(objs[0])
@@ -669,10 +659,6 @@ class pysambaCnx:
                 cursor._pEnum = None
                 return 0
 
-            except WError, e:
-                cursor._pEnum = None
-                objs = None
-                raise InterfaceError(e)
             except Exception, e:
                 cursor._pEnum = None
                 objs = None
@@ -702,6 +688,7 @@ class pysambaCnx:
         if self._ctx:
             talloc_free(self._ctx)
         self._ctx = None
+        self._lock = None
 
     def commit(self):
         """
