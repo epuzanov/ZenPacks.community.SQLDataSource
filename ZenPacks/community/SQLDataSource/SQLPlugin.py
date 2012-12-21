@@ -21,10 +21,6 @@ from Products.ZenUtils.ZenTales import talesEval
 from ZenPacks.community.SQLDataSource.SQLClient import SQLClient, getPool
 from twisted.internet.defer import Deferred
 
-SQLCLIENT_POOL = {}
-def getPoola(name, factory=None):
-    return SQLCLIENT_POOL
-
 class SQLPlugin(CollectorPlugin):
     """
     A SQLPlugin defines a native Python collection routine and a parsing
@@ -59,11 +55,14 @@ class SQLPlugin(CollectorPlugin):
         return self.queries(device)
 
     def clientFinished(self, client):
-        for plugin, results in client.getResults():
-            plugin.deferred.callback(results)
+        results = client.getResults()
+        while results:
+            plugin, result = results.pop(0)
+            plugin.deferred.callback(result)
         poolKey = client.hostname
-        self._pool[poolKey] = None
-        del self._pool[poolKey] 
+        if poolKey in self._pool:
+            self._pool[poolKey] = None
+            del self._pool[poolKey] 
 
     def collect(self, device, log):
         self.deferred = Deferred()

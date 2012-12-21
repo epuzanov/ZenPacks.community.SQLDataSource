@@ -251,7 +251,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self._lastErrorMsg = ''
         self._datasources = taskConfig.datasources
         self._connectionString = taskConfig.datasources[0].connectionString
-        self._connection = None
         self._pool = getPool('adbapi connections')
         self.executed = 0
 
@@ -274,18 +273,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Close the connection currently associated with this task.
         """
-        if self.name in getattr(self._connection, "_running", []):
-            self._connection._running.remove(self.name)
-        if getattr(self._connection, "_running", []):
-            self._connection = None
-        else:
-            self._connection = None
-            poolKey = self._getPoolKey()
-            if poolKey in self._pool:
-                connection = self._pool.pop(poolKey)
-                if hasattr(connection, "close"):
-                    connection.close()
-                    del connection
+        poolKey = self._getPoolKey()
+        connection = self._pool.get(poolKey)
+        if connection is not None:
+            connection.close(self.name)
+            if not connection._connection:
+                del self._pool[poolKey]
 
     def doTask(self):
         """
@@ -312,27 +305,23 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         pool dictionary, if not create a new ConnectionPool.
         """
         self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-        if self.name in getattr(self._connection, "_running", []):
-            return
-        if not self._connection:
-            poolKey = self._getPoolKey()
-            connection = self._pool.get(poolKey)
-            if connection is None:
-                log.debug("Creating ConnectionPool: %s%s", poolKey,
-                    self._preferences.options.showconnectionstring and \
-                    ", connection string: %s"%self._connectionString or "")
-                connection = adbapiClient(self._connectionString)
-                connection.connect()
-                self._pool[poolKey] = connection
-            self._connection = connection
-        self._connection._running.append(self.name)
+        poolKey = self._getPoolKey()
+        connection = self._pool.get(poolKey)
+        if connection is None:
+            log.debug("Creating ConnectionPool: %s%s", poolKey,
+                self._preferences.options.showconnectionstring and \
+                ", connection string: %s"%self._connectionString or "")
+            connection = adbapiClient(self._connectionString)
+            connection.connect()
+            self._pool[poolKey] = connection
+        if self.name not in connection._running:
+            connection._running.append(self.name)
+        return connection
 
     def _close(self):
         """
         do nothing.
         """
-        if self.name in getattr(self._connection, "_running", []):
-            self._connection._running.remove(self.name)
         return
 
     def _failure(self, reason):
@@ -394,7 +383,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             rows = txn.fetchmany()
         return res
 
-    def _fetchPerf(self, ignored):
+    def _fetchPerf(self, connection):
         """
         Get performance data for all the monitored components on a device
 
@@ -405,7 +394,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
 
         log.debug("Task %s: Pool: %s Query: %s", self.name, self._getPoolKey(),
                                                     self._datasources[0].sqlp)
-        d = self._connection.query(self._datasources[0])
+        d = connection.query(self._datasources[0])
         d.addCallback(self._parseResults)
         d.addCallback(self._storeResults)
         d.addCallback(self._updateStatus)

@@ -39,11 +39,12 @@ import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
+ACTIONPAT = re.compile(r'>(.*)</wsa:Action>')
 
 XML_NS_SOAP_1_2 = "http://www.w3.org/2003/05/soap-envelope"
 XML_NS_ADDRESSING = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 XML_NS_ENUMERATION = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
-XML_NS_CIM_INTRINSIC = "http://schemas.openwsman.org/wbem/wscim/1/intrinsic"
+#XML_NS_CIM_INTRINSIC = "http://schemas.openwsman.org/wbem/wscim/1/intrinsic"
 XML_NS_WS_MAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
 XML_NS_CIM_CLASS = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2"
 XML_NS_WIN32_CIM_CLASS = "http://schemas.microsoft.com/wbem/wsman/1/wmi"
@@ -514,8 +515,7 @@ class wsmanCursor(object):
         self.description = None
         if self._enumCtx:
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
-                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx),
-                ENUM_ACTION_RELEASE)
+                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
         del self._rows[:]
         self._parser = None
         self._selectors.clear()
@@ -538,8 +538,7 @@ class wsmanCursor(object):
         self._selectors.clear()
         if self._enumCtx:
             try: self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
-                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx),
-                ENUM_ACTION_RELEASE)
+                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
             finally: self._enumCtx = None
 
         # for this method default value for params cannot be None,
@@ -578,7 +577,6 @@ class wsmanCursor(object):
                 try:
                     self._connection._wsman_request(INTR_REQ%(classname,
                         classname, self._url, classname, uuid.uuid4()),
-                        '/'.join((XML_NS_CIM_INTRINSIC, classname, 'GetClass')),
                         self._get_parser(True))
                 except Exception: pass
             if not self._namespace.startswith('http'):
@@ -594,12 +592,10 @@ class wsmanCursor(object):
             else: self._uri = '/'.join((self._namespace, classname))
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
                 self._url, self._uri, uuid.uuid4(),
-                ENUM_TMPL%(self._fltr and self._fltr%operation or '')),
-                ENUM_ACTION_ENUMERATE, self._get_parser())
+                ENUM_TMPL%(self._fltr and self._fltr%operation or '')),self._get_parser())
             if not self._enumCtx: return
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),
-                ENUM_ACTION_PULL, self._get_parser())
+                self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),self._get_parser())
             if self.description: self.rownumber = 0
 
         except InterfaceError, e:
@@ -634,8 +630,7 @@ class wsmanCursor(object):
         try:
             while not self._rows and self._enumCtx:
                 self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                    self._url, self._uri, uuid.uuid4(),PULL_TMPL%self._enumCtx),
-                    ENUM_ACTION_PULL, self._get_parser())
+                    self._url, self._uri, uuid.uuid4(),PULL_TMPL%self._enumCtx),self._get_parser())
             if not self._rows: return None
             self.rownumber += 1
             return self._rows.pop(0)
@@ -704,14 +699,13 @@ class wsmanCnx:
 
     def __init__(self, *args, **kwargs):
         self._timeout = float(kwargs.get('timeout', 120))
-        dialect = kwargs.get('dialect', '').upper()
         self._scheme = str(kwargs.get('scheme', 'https')).lower()
         self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',
             'port':int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))}
         self._path = kwargs.get('path', '/wsman')
-        self._url = '%s://%s:%s%s'%(scheme, conkwargs['host'],
-                                    conkwargs['port'], self._path)
+        self._url = '%s://%s:%s%s'%(self._scheme, self._conkwargs['host'],
+                                    self._conkwargs['port'], self._path)
         self._namespace = kwargs.get('namespace') or 'root/cimv2'
         self._headers = {'Content-type': 'application/soap+xml; charset="utf-8"',
                         'User-Agent': 'pywsmandb'}
@@ -737,15 +731,16 @@ class wsmanCnx:
         else: self._wsm_vendor = ''
 
 
-    def _wsman_request(self, data, action = None, parser=None):
+    def _wsman_request(self, data, parser=None):
         """Send SOAP+XML data over HTTP to the specified url. Return the
         response in XML.  Uses Python's build-in httplib.
         """
 
         headers = {}
         headers.update(self._headers)
+        action = ACTIONPAT.search(data)
         if action:
-            headers['SOAPAction'] = action
+            headers['SOAPAction'] = action.group(1)
 
         if self._scheme == 'https':
             connection = httplib.HTTPSConnection(**self._conkwargs)
@@ -758,7 +753,6 @@ class wsmanCnx:
             oldtimeout = socket.getdefaulttimeout()
             if oldtimeout != self._timeout:
                 socket.setdefaulttimeout(self._timeout)
-        parsed = False
         try:
             try:
                 try:
@@ -789,7 +783,6 @@ class wsmanCnx:
                     inpsrc = xmlreader.InputSource()
                     inpsrc.setByteStream(StringIO(xml_resp))
                     parser.parse(inpsrc)
-                parsed = True
             except SAXParseException, e:
                 raise OperationalError("XML parsing error: %s" % e.getMessage())
             except httplib.BadStatusLine, arg:
@@ -801,13 +794,6 @@ class wsmanCnx:
         finally:
             if oldtimeout and oldtimeout != socket.getdefaulttimeout():
                 socket.setdefaulttimeout(oldtimeout)
-            if not parsed:
-                if hasattr(parser, "_cont_handler"):
-                    if parser._cont_handler._cur._parser == parser:
-                        cursor = parser._cont_handler._cur
-                        cursor._parser = None
-                    else:
-                        parser = None
         return xml_resp
 
     def __del__(self):
