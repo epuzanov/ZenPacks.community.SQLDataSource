@@ -688,7 +688,6 @@ class pysambaCnx:
         if self._ctx:
             talloc_free(self._ctx)
         self._ctx = None
-        self._lock = None
 
     def commit(self):
         """

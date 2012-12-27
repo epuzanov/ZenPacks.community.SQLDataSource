@@ -274,11 +274,11 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         Close the connection currently associated with this task.
         """
         poolKey = self._getPoolKey()
-        connection = self._pool.get(poolKey)
-        if connection is not None:
-            connection.close(self.name)
-            if not connection._connection:
-                del self._pool[poolKey]
+        if self.name in getattr(self._pool.get('poolKey'), '_running', []):
+            self._pool['poolKey'].close(self.name)
+        if poolKey in self._pool and not self._pool[poolKey]._connection:
+            try: del self._pool[poolKey]
+            except: pass
 
     def doTask(self):
         """
@@ -348,40 +348,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                                      summary=msg,
                                      severity=Event.Error)
         return reason
-
-    def _runQuery(self, txn, sql, columns, timeout):
-        """
-        execute a sql query.
-
-        @param txn: database cursor
-        @type txn: dbapi.cursor or adbapi.Transaction
-        @param sql: sql operation
-        @type sql: string
-        @param columns: columns to return
-        @type columns: list
-        @param timeout: timeout in seconds
-        @type timeout: int
-        """
-        for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
-            if not q.strip(): continue
-            txn.execute(q.strip())
-        if not txn.description:
-            return res
-        header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
-        if set(columns).intersection(set(header)):
-            varVal = False
-        else:
-            res.append({})
-            varVal = True
-        rows = txn.fetchmany()
-        while rows:
-            for row in rows:
-                if varVal:
-                    res[0][str(row[0]).lower()] = row[-1]
-                else:
-                    res.append(dict(zip(header, row)))
-            rows = txn.fetchmany()
-        return res
 
     def _fetchPerf(self, connection):
         """
@@ -546,14 +512,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         # Return the result so the framework can track success/failure
         return result
 
-    def displayStatistics1(self):
+    def displayStatistics(self):
         """
         Called by the collector framework scheduler, and allows us to
         see how each task is doing.
         """
         display = "Active SQL Pools: %s\n"%len(self._pool)
-        poolKey = self._getPoolKey()
-        connection = self._pool.get(poolKey)
         for n, p in self._pool.iteritems():
             display += 'pool: %s\n'%n
             display += '\ttasks running: %s\n'%'\n\t\t'.join(p._running)

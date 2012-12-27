@@ -94,28 +94,37 @@ class adbapiClient(object):
         self.cs = cs
         self._connection = None
         self._running = []
+        self._lock = threading.Lock()
 
     def __del__(self):
        self.close()
 
     def connect(self):
-        if self._connection:
-            return
-        args, kwargs = parseConnectionString(self.cs)
-        self._connection = adbapi.ConnectionPool(*args, **kwargs)
-        if 'cp_min' not in kwargs:
-            self._connection.min = 1
-        if 'cp_max' not in kwargs or self._connection.dbapi in ("pywmidb",):
-            self._connection.max = 1
+        try:
+            self._lock.acquire()
+            if self._connection:
+                return
+            args, kwargs = parseConnectionString(self.cs)
+            if 'cp_min' not in kwargs:
+                kwargs['cp_min'] = 1
+            if 'cp_max' not in kwargs:
+                kwargs['cp_max'] = 1
+            self._connection = adbapi.ConnectionPool(*args, **kwargs)
+        finally:
+            self._lock.release()
 
     def close(self, task=None):
-        if task is None:
-            del self._running[:]
-        elif task in self._running:
-            self._running.remove(task)
-        if self._connection and not self._running:
-            self._connection.close()
-            self._connection = None
+        try:
+            self._lock.acquire()
+            if task is None:
+                del self._running[:]
+            elif task in self._running:
+                self._running.remove(task)
+            if self._connection and not self._running:
+                self._connection.close()
+                self._connection = None
+        finally:
+            self._lock.release()
 
     def _timeout(self, txn):
         if hasattr(txn._connection, 'cancel'):
@@ -192,7 +201,6 @@ class adbapiClient(object):
         if not self._connection:
             self.connect()
         semaphore = getSemaphore(self._connection.dbapiName)
-        log.info('dbapi: %s, semaphore: %s, waiting: %s', self._connection.dbapiName, semaphore, semaphore.waiting)
         return semaphore.run(self._connection.runInteraction, self.runQuery,
                                         task.sqlp, task.columns, task.timeout)
 
@@ -200,13 +208,17 @@ class adbapiClient(object):
 class dbapiClient(adbapiClient):
 
     def connect(self):
-        fl = []
-        args, kwargs = parseConnectionString(self.cs)
-        if '.' in args[0]:
-            fl.append(args[0].split('.')[-1])
-        dbapi = __import__(args[0], globals(), locals(), fl)
-        self._connection = dbapi.connect(*args[1:], **kwargs)
-        return self
+        try:
+            self._lock.acquire()
+            fl = []
+            args, kwargs = parseConnectionString(self.cs)
+            if '.' in args[0]:
+                fl.append(args[0].split('.')[-1])
+            dbapi = __import__(args[0], globals(), locals(), fl)
+            self._connection = dbapi.connect(*args[1:], **kwargs)
+            return self
+        finally:
+            self._lock.release()
 
     def _timeout(self, txn):
         if hasattr(self._connection, 'cancel'):
@@ -347,8 +359,13 @@ class SQLClient(BaseClient):
         self.results = []
         self._running = False
         self._taskQueue = []
-        self._connections = []
         self._pool = getPool('adbapi connections')
+
+    def __del__(self):
+        del self.results[:]
+        del self.plugins[:]
+        del self._taskQueue[:]
+        self._pool = None
 
     def query(self, queries):
         """
@@ -386,7 +403,6 @@ class SQLClient(BaseClient):
                 connection = adbapiClient(dsc.connectionString)
                 connection.connect()
                 self._pool[poolKey] = connection
-                self._connections.append(poolKey)
             if hash(self) not in connection._running:
                 connection._running.append(hash(self))
             d = connection.query(dsc)
@@ -494,10 +510,10 @@ class SQLClient(BaseClient):
         Stop the collection of performance data
         """
         log.info("SQL client finished collection for %s" % self.hostname)
-        for poolKey in self._connections:
-            if poolKey not in self._pool: continue
-            self._pool[poolKey].close(hash(self))
-            if not getattr(self._pool[poolKey], "_connection", None):
+        for poolKey in self._pool.keys():
+            if hash(self) in getattr(self._pool.get('poolKey'), '_running', []):
+                self._pool['poolKey'].close(hash(self))
+            if poolKey in self._pool and not self._pool[poolKey]._connection:
                 del self._pool[poolKey]
         if self.datacollector:
             self.datacollector.clientFinished(self)
