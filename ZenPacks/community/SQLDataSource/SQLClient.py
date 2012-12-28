@@ -511,9 +511,9 @@ class SQLClient(BaseClient):
         """
         log.info("SQL client finished collection for %s" % self.hostname)
         for poolKey in self._pool.keys():
-            if hash(self) in getattr(self._pool.get('poolKey'), '_running', []):
-                self._pool['poolKey'].close(hash(self))
-            if poolKey in self._pool and not self._pool[poolKey]._connection:
+            if hash(self) in getattr(self._pool.get(poolKey), '_running', []):
+                self._pool[poolKey].close(hash(self))
+            if not getattr(self._pool.get(poolKey), '_connection',  True):
                 del self._pool[poolKey]
         if self.datacollector:
             self.datacollector.clientFinished(self)

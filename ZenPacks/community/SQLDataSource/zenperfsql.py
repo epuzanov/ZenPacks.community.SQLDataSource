@@ -250,7 +250,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                                                         COLLECTOR_NAME)
         self._lastErrorMsg = ''
         self._datasources = taskConfig.datasources
-        self._connectionString = taskConfig.datasources[0].connectionString
+        self._connectionString = str(taskConfig.datasources[0].connectionString)
         self._pool = getPool('adbapi connections')
         self.executed = 0
 
@@ -274,11 +274,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         Close the connection currently associated with this task.
         """
         poolKey = self._getPoolKey()
-        if self.name in getattr(self._pool.get('poolKey'), '_running', []):
-            self._pool['poolKey'].close(self.name)
-        if poolKey in self._pool and not self._pool[poolKey]._connection:
-            try: del self._pool[poolKey]
-            except: pass
+        if self.name in getattr(self._pool.get(poolKey), '_running', []):
+            self._pool[poolKey].close(self.name)
+        if not getattr(self._pool.get(poolKey), '_connection',  True):
+            del self._pool[poolKey]
 
     def doTask(self):
         """
