@@ -198,14 +198,14 @@ class ProgrammingError(DatabaseError):
 class NotSupportedError(DatabaseError):
     pass
 
-#import threading
-#LOCK = threading.Lock()
+import threading
 class noLock:
     def acquire(self):
         return
     def release(self):
         return
-LOCK = noLock()
+#LOCK = noLock()
+LOCK = threading.RLock()
 def Lock():
     return LOCK
 
@@ -229,19 +229,13 @@ class wmiCursor(object):
         self._pEnum = None
         self._firstrow = None
 
-    connection = property(lambda self: self._getConnection())
-    def _getConnection(self):
-        warn("DB-API extension cursor.connection used", stacklevel=3)
-        return self._connection
-
     def _check_executed(self):
-        if not self._connection._ctx:
-            raise InterfaceError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
 
     def __del__(self):
-        self.close()
+        if self._connection:
+            self.close()
 
     def _release(self):
         """
@@ -258,6 +252,10 @@ class wmiCursor(object):
         Closes the cursor. The cursor is unusable from this point.
         """
         self._release()
+        if getattr(self._connection, '_ctx', None):
+            if talloc_free(self._connection._ctx) == 0:
+                self._connection._ctx = None
+        self._connection = None
 
     def _convertArray(self, arr):
         """
@@ -325,8 +323,6 @@ class wmiCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not self._connection._ctx:
-            raise InterfaceError("Connection closed.")
         self._release()
         self.rownumber = -1
 
@@ -562,7 +558,7 @@ class pysambaCnx:
                 library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
 
             except Exception, e:
-                self.close()
+                self._close()
                 raise InterfaceError(e)
         finally: self._lock.release()
         self._connect()
@@ -571,6 +567,8 @@ class pysambaCnx:
         """
         Connect to server
         """
+        if not self._ctx:
+            raise InterfaceError("Connection closed.")
         try:
             self._lock.acquire()
             try:
@@ -590,7 +588,7 @@ class pysambaCnx:
                 WERR_CHECK(result, self._host, "Connect")
 
             except Exception, e:
-                self.close()
+                self._close()
                 raise InterfaceError(e)
         finally: self._lock.release()
 
@@ -598,6 +596,8 @@ class pysambaCnx:
         """
         Executes WQL query
         """
+        if not self._ctx:
+            raise InterfaceError("Connection closed.")
         ocount = uint32_t()
         try:
             self._lock.acquire()
@@ -636,6 +636,8 @@ class pysambaCnx:
         """
         Returned next object from Enumarator
         """
+        if not self._ctx:
+            raise InterfaceError("Connection closed.")
         ocount = uint32_t()
         try:
             self._lock.acquire()
@@ -669,6 +671,8 @@ class pysambaCnx:
         """
         Release Enumerator
         """
+        if not self._ctx:
+            return
         try:
             self._lock.acquire()
             try:
@@ -678,16 +682,26 @@ class pysambaCnx:
         finally: self._lock.release()
 
     def __del__(self):
-        self.close()
+        if self._ctx:
+            self.close()
+
+    def _close(self):
+        """
+        Close connection to the WMI CIMOM. Implicitly rolls back
+        """
+        while self._ctx:
+            if talloc_free(self._ctx) == 0:
+                self._pWS = None
+                self._ctx = None
 
     def close(self):
         """
         Close connection to the WMI CIMOM. Implicitly rolls back
         """
-        self._pWS = None
-        if self._ctx:
-            talloc_free(self._ctx)
-        self._ctx = None
+        try:
+            self._lock.acquire()
+            self._close()
+        finally: self._lock.release()
 
     def commit(self):
         """
@@ -706,6 +720,7 @@ class pysambaCnx:
         Return cursor object that can be used to make queries and fetch
         results from the database.
         """
+        talloc_increase_ref_count(self._ctx)
         return wmiCursor(self)
 
     def autocommit(self, status):

@@ -27,6 +27,11 @@ from twisted.python.failure import Failure
 from twisted.enterprise import adbapi
 from twisted.spread import pb
 
+try:
+    import pyodbc
+    pyodbc.pooling = False
+except: pass
+
 import threading
 import sys
 import re
@@ -95,6 +100,7 @@ class adbapiClient(object):
         self._connection = None
         self._running = []
         self._lock = threading.Lock()
+        self._dbapi = None
 
     def __del__(self):
        self.close()
@@ -110,6 +116,7 @@ class adbapiClient(object):
             if 'cp_max' not in kwargs:
                 kwargs['cp_max'] = 1
             self._connection = adbapi.ConnectionPool(*args, **kwargs)
+            self._dbapi = self._connection.dbapi
         finally:
             self._lock.release()
 
@@ -123,6 +130,7 @@ class adbapiClient(object):
             if self._connection and not self._running:
                 self._connection.close()
                 self._connection = None
+                self._dbapi = None
         finally:
             self._lock.release()
 
@@ -133,15 +141,15 @@ class adbapiClient(object):
 
     def _convert(self, val, type):
         if val is None:
-            if type == self._connection.dbapi.STRING: return ''
-            if type == self._connection.dbapi.NUMBER: return 0
+            if type == self._dbapi.STRING: return ''
+            if type == self._dbapi.NUMBER: return 0
             return None
-        if val and type == self._connection.dbapi.NUMBER:
+        if val and type == self._dbapi.NUMBER:
             if isinstance(val, (int, long, float)): return val
             if str(val).isdigit(): return long(val)
             if str(val).replace('.', '', 1).isdigit(): return float(val)
             return val
-        if type == self._connection.dbapi.STRING:
+        if type == self._dbapi.STRING:
             return str(val).strip()
         return val
 
@@ -216,6 +224,7 @@ class dbapiClient(adbapiClient):
                 fl.append(args[0].split('.')[-1])
             dbapi = __import__(args[0], globals(), locals(), fl)
             self._connection = dbapi.connect(*args[1:], **kwargs)
+            self._dbapi = dbapi
             return self
         finally:
             self._lock.release()
@@ -233,11 +242,16 @@ class dbapiClient(adbapiClient):
         @type task: DataSourceConfig
         """
         try:
+            self._lock.acquire()
             cursor = self._connection.cursor()
-            result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
-            cursor.close()
-        except Exception, ex:
-            result = Failure(ex)
+            try:
+                result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
+            except Exception, ex:
+                result = Failure(ex)
+        finally:
+            try: cursor.close()
+            except: pass
+            self._lock.release()
         return result
 
 

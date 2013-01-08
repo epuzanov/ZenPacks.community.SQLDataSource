@@ -250,6 +250,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                                                         COLLECTOR_NAME)
         self._lastErrorMsg = ''
         self._datasources = taskConfig.datasources
+
         self._connectionString = str(taskConfig.datasources[0].connectionString)
         self._pool = getPool('adbapi connections')
         self.executed = 0
@@ -303,10 +304,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         check if ADB-API ConnectionPool for specific connection string in
         pool dictionary, if not create a new ConnectionPool.
         """
-        self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
         poolKey = self._getPoolKey()
         connection = self._pool.get(poolKey)
         if connection is None:
+            self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
             log.debug("Creating ConnectionPool: %s%s", poolKey,
                 self._preferences.options.showconnectionstring and \
                 ", connection string: %s"%self._connectionString or "")
@@ -352,8 +353,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Get performance data for all the monitored components on a device
 
-        @parameter ignored: required to keep Twisted's callback chain happy
-        @type ignored: result of previous callback
+        @parameter connection: adbapiClient connection
+        @type connection: adbapiClient
         """
         self.state = SqlPerformanceCollectionTask.STATE_FETCH_DATA
 
@@ -365,20 +366,32 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         d.addCallback(self._updateStatus)
         return d
 
-    def _processDatasourceResults(self, datasource):
+    def _processDatasourceResults(self, datasource, results=[]):
         """
         Process a single datasource's result
 
-        @parameter datasource: results rows
+        @parameter datasource: datasource
         @type datasource: DataSourceConfig object
+        @parameter results: results rows
+        @type results: list
         """
         msg = 'Datasource %s query completed successfully' % (datasource.name)
+        if datasource.keybindings:
+            kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
+                            for k in datasource.keybindings.iteritems()])
+            kv = ''.join(kv)
+        else: kc, kv = (), ''
+        dsresult = []
+        for row in results:
+            if ''.join([str(row.get(k) or '').strip() for k in kc]
+                ).lower() != kv: continue
+            dsresult.append(row)
         result = ParsedResults()
         ev = self._makeQueryEvent(datasource, msg, Clear)
         result.events.append(ev)
         for dp in datasource.points:
             values = []
-            for row in datasource.result:
+            for row in dsresult:
                 dpvalue = row.get(dp.alias, None)
                 if dpvalue in (None, '', []):
                     continue
@@ -400,7 +413,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                             dpvalue = rrpn(dp.expr, dpvalue)
                     values.append(float(dpvalue))
                 except: continue
-            if dp.id.endswith('_count'): value = len(datasource.result)
+            if dp.id.endswith('_count'): value = len(dsresult)
             elif not values: value = None
             elif len(values) == 1: value = values[0]
             elif dp.id.endswith('_avg'):value = sum(values) / len(values)
@@ -411,7 +424,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             elif dp.id.endswith('_last'): value = values[-1]
             else: value = sum(values) / len(values)
             result.values.append((dp, value))
-        datasource.result = None
         return datasource, result
 
     def _parseResults(self, results):
@@ -419,25 +431,17 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         Interpret the results retrieved from the commands and pass on
         the datapoint values and events.
 
-        @parameter resultList: results of running the commands in a DeferredList
-        @type resultList: array of (boolean, (datasource, result))
+        @parameter results: results rows
+        @type results: list
         """
         self.state = SqlPerformanceCollectionTask.STATE_PARSE_DATA
         parseableResults = []
 
         for ds in self._datasources:
-            if ds.keybindings:
-                kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
-                                for k in ds.keybindings.iteritems()])
-                kv = ''.join(kv)
-            else: kc, kv = (), ''
-            ds.result = []
-            for row in results:
-                if ''.join([str(row.get(k) or '').strip() for k in kc]
-                    ).lower() != kv: continue
-                ds.result.append(row)
-            parseableResults.append(self._processDatasourceResults(ds))
-        return parseableResults
+            d = defer.succeed(ds)
+            d.addCallback(self._processDatasourceResults, results)
+            parseableResults.append(d)
+        return defer.gatherResults(parseableResults)
 
     def _storeResults(self, resultList):
         """
