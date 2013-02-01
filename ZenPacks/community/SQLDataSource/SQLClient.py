@@ -27,11 +27,6 @@ from twisted.python.failure import Failure
 from twisted.enterprise import adbapi
 from twisted.spread import pb
 
-try:
-    import pyodbc
-    pyodbc.pooling = False
-except: pass
-
 import threading
 import sys
 import re
@@ -47,15 +42,11 @@ except ImportError:
         else:
             return SQLCLIENT_POOL
 
-SEM_POOL = {'pywmidb': defer.DeferredSemaphore(1),
-            'pyisqldb': defer.DeferredSemaphore(1),
-            'pywbemdb': defer.DeferredSemaphore(10),
-            'pywsmandb': defer.DeferredSemaphore(10),
-            'pyodbc': defer.DeferredSemaphore(5),
-            }
+SEM_POOL = {}
 
-def getSemaphore(name):
-    return SEM_POOL.setdefault(name, defer.DeferredSemaphore(2))
+def getSemaphore(name, size):
+    global SEM_POOL
+    return SEM_POOL.setdefault(name, defer.DeferredSemaphore(size))
 
 class TimeoutError(Exception):
     """
@@ -89,6 +80,12 @@ def parseConnectionString(cs='', options={}):
     kwargs.update(options)
     return args, kwargs
 
+class noLock:
+    def acquire(self):
+        return
+    def release(self):
+        return
+
 class adbapiClient(object):
 
     def __init__(self, cs):
@@ -98,22 +95,25 @@ class adbapiClient(object):
         """
         self.cs = cs
         self._connection = None
-        self._running = []
-        self._lock = threading.Lock()
+        self._running = set()
+        self._lock = noLock()
         self._dbapi = None
 
     def __del__(self):
-       self.close()
+        if self._connection:
+            self.close()
 
-    def connect(self):
+    def connect(self, task=None):
         try:
             self._lock.acquire()
+            if task:
+                self._running.add(task)
             if self._connection:
                 return
             args, kwargs = parseConnectionString(self.cs)
             if 'cp_min' not in kwargs:
                 kwargs['cp_min'] = 1
-            if 'cp_max' not in kwargs:
+            if 'cp_max' not in kwargs and args[0] in ('pywmidb',):
                 kwargs['cp_max'] = 1
             self._connection = adbapi.ConnectionPool(*args, **kwargs)
             self._dbapi = self._connection.dbapi
@@ -124,20 +124,15 @@ class adbapiClient(object):
         try:
             self._lock.acquire()
             if task is None:
-                del self._running[:]
-            elif task in self._running:
-                self._running.remove(task)
+                self._running.clear()
+            else:
+                self._running.discard(task)
             if self._connection and not self._running:
                 self._connection.close()
                 self._connection = None
                 self._dbapi = None
         finally:
             self._lock.release()
-
-    def _timeout(self, txn):
-        if hasattr(txn._connection, 'cancel'):
-            txn._connection.cancel()
-        txn._cursor.close()
 
     def _convert(self, val, type):
         if val is None:
@@ -167,7 +162,12 @@ class adbapiClient(object):
         @type timeout: int
         """
         res = []
-        t = threading.Timer(timeout, self._timeout, txn)
+        def _timeout():
+            if hasattr(txn, '_cursor'):
+                txn._cursor.close()
+            else:
+                txn.close()
+        t = threading.Timer(timeout, _timeout)
         t.start()
         try:
             for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
@@ -207,8 +207,8 @@ class adbapiClient(object):
         @type task: DataSourceConfig
         """
         if not self._connection:
-            self.connect()
-        semaphore = getSemaphore(self._connection.dbapiName)
+            raise Exception('Connection lost')
+        semaphore=getSemaphore(self._connection.dbapiName,self._connection.max)
         return semaphore.run(self._connection.runInteraction, self.runQuery,
                                         task.sqlp, task.columns, task.timeout)
 
@@ -228,11 +228,6 @@ class dbapiClient(adbapiClient):
             return self
         finally:
             self._lock.release()
-
-    def _timeout(self, txn):
-        if hasattr(self._connection, 'cancel'):
-            self._connection.cancel()
-        txn.close()
 
     def query(self, task):
         """
@@ -408,17 +403,15 @@ class SQLClient(BaseClient):
     def _runTask(self):
         if not self._taskQueue:
             return self.clientFinished()
-	if not self._running:
+        if not self._running:
             self._running = True
             dsc = self._taskQueue[0]
             poolKey = hash(dsc.connectionString)
             connection = self._pool.get(poolKey)
             if connection is None:
                 connection = adbapiClient(dsc.connectionString)
-                connection.connect()
+                connection.connect(hash(self))
                 self._pool[poolKey] = connection
-            if hash(self) not in connection._running:
-                connection._running.append(hash(self))
             d = connection.query(dsc)
             d.addBoth(self._finished, dsc)
             reactor.callLater(0, self._runTask)

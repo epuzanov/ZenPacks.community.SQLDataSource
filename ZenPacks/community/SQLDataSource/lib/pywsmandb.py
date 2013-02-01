@@ -25,6 +25,7 @@ __version__ = '2.2.2'
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
 import httplib, base64
+import threading
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -501,7 +502,9 @@ class wsmanCursor(object):
 
     def _check_executed(self):
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
 
@@ -532,7 +535,9 @@ class wsmanCursor(object):
         guidelines.
         """
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         self.description = None
         self.rownumber = -1
         self._selectors.clear()
@@ -681,13 +686,13 @@ class wsmanCursor(object):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
     def setoutputsize(self, size=None, column=0):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
 
 ### connection object
@@ -698,7 +703,8 @@ class wsmanCnx:
     """
 
     def __init__(self, *args, **kwargs):
-        self._timeout = float(kwargs.get('timeout', 120))
+        self._connection = None
+        self._timeout = float(kwargs.get('timeout', 10))
         self._scheme = str(kwargs.get('scheme', 'https')).lower()
         self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',
@@ -729,6 +735,7 @@ class wsmanCnx:
             self._wsm_vendor = 'Microsoft'
         elif 'Openwsman' in xml_resp: self._wsm_vendor = 'Openwsman'
         else: self._wsm_vendor = ''
+        self._lock = threading.Lock()
 
 
     def _wsman_request(self, data, parser=None):
@@ -736,34 +743,35 @@ class wsmanCnx:
         response in XML.  Uses Python's build-in httplib.
         """
 
-        headers = {}
-        headers.update(self._headers)
-        action = ACTIONPAT.search(data)
-        if action:
-            headers['SOAPAction'] = action.group(1)
-
-        if self._scheme == 'https':
-            connection = httplib.HTTPSConnection(**self._conkwargs)
-        else:
-            connection = httplib.HTTPConnection(**self._conkwargs)
         oldtimeout = None
-        if hasattr(connection, 'timeout'):
-            connection.timeout = self._timeout
-        else:
-            oldtimeout = socket.getdefaulttimeout()
-            if oldtimeout != self._timeout:
-                socket.setdefaulttimeout(self._timeout)
         try:
+            self._lock.acquire()
+            headers = {}
+            headers.update(self._headers)
+            action = ACTIONPAT.search(data)
+            if action:
+                headers['SOAPAction'] = action.group(1)
+
+            if self._scheme == 'https':
+                self._connection = httplib.HTTPSConnection(**self._conkwargs)
+            else:
+                self._connection = httplib.HTTPConnection(**self._conkwargs)
+            if hasattr(self._connection, 'timeout'):
+                self._connection.timeout = self._timeout
+            else:
+                oldtimeout = socket.getdefaulttimeout()
+                if oldtimeout != self._timeout:
+                    socket.setdefaulttimeout(self._timeout)
             try:
                 try:
-                    if not getattr(connection, 'sock', None):
-                        connection.connect()
-                    connection.request('POST', self._path, data, headers)
+                    if not getattr(self._connection, 'sock', None):
+                        self._connection.connect()
+                    self._connection.request('POST', self._path, data, headers)
                 except socket.error, arg:
                     if arg[0] != 104 and arg[0] != 32:
                         raise
 
-                response = connection.getresponse()
+                response = self._connection.getresponse()
                 xml_resp = response.read()
 
                 if xml_resp.find("'", 0, xml_resp.find("\n")) > 0:
@@ -783,6 +791,7 @@ class wsmanCnx:
                     inpsrc = xmlreader.InputSource()
                     inpsrc.setByteStream(StringIO(xml_resp))
                     parser.parse(inpsrc)
+                return xml_resp
             except SAXParseException, e:
                 raise OperationalError("XML parsing error: %s" % e.getMessage())
             except httplib.BadStatusLine, arg:
@@ -792,9 +801,12 @@ class wsmanCnx:
             except socket.sslerror, arg:
                 raise InterfaceError("SSL error: %s" % (arg,))
         finally:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
             if oldtimeout and oldtimeout != socket.getdefaulttimeout():
                 socket.setdefaulttimeout(oldtimeout)
-        return xml_resp
+            self._lock.release()
 
     def __del__(self):
         self.close()
@@ -803,25 +815,35 @@ class wsmanCnx:
         """
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
-        return
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+        self._conkwargs.clear()
 
     def commit(self):
         """
         Commit transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
 
     def rollback(self):
         """
         Roll back transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
 
     def cursor(self):
         """
         Return cursor object that can be used to make queries and fetch
         results from the database.
         """
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
         return wsmanCursor(self)
 
     def autocommit(self, status):

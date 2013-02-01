@@ -62,6 +62,8 @@ unused(DeviceProxy)
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
 
+POOL_LOCK = defer.DeferredLock()
+
 #
 # RPN reverse calculation
 #
@@ -134,7 +136,6 @@ class SqlPerformanceCollectionPreferences(object):
 STATUS_EVENT = {'eventClass' : '/Status/PyDBAPI',
                 'component' : 'zenperfsql',
 }
-
 
 class SubConfigurationTaskSplitter(SimpleTaskSplitter):
     """
@@ -260,8 +261,8 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                self.name, self.configId, len(self._datasources))
 
     def cleanup(self):
-        self._cleanUpPool()
         self._close()
+        return POOL_LOCK.run(self._cleanUpPool)
 
     def _getPoolKey(self):
         """
@@ -275,10 +276,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         Close the connection currently associated with this task.
         """
         poolKey = self._getPoolKey()
-        if self.name in getattr(self._pool.get(poolKey), '_running', []):
-            self._pool[poolKey].close(self.name)
-        if not getattr(self._pool.get(poolKey), '_connection',  True):
-            del self._pool[poolKey]
+        connection = self._pool.get(poolKey)
+        if connection is not None:
+            if not connection._running:
+                connection.close()
+            if connection._connection is None:
+                del self._pool[poolKey]
 
     def doTask(self):
         """
@@ -289,7 +292,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @rtype: Twisted deferred object
         """
         # See if we need to connect first before doing any collection
-        d = defer.maybeDeferred(self._connect)
+        d = POOL_LOCK.run(self._connect)
         d.addCallback(self._fetchPerf)
         d.addErrback(self._failure)
 
@@ -312,17 +315,21 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                 self._preferences.options.showconnectionstring and \
                 ", connection string: %s"%self._connectionString or "")
             connection = adbapiClient(self._connectionString)
-            connection.connect()
             self._pool[poolKey] = connection
-        if self.name not in connection._running:
-            connection._running.append(self.name)
+        connection.connect(self.name)
+        if not connection._connection:
+            del self._pool[poolKey]
+            raise Exception('Connection lost')
         return connection
 
     def _close(self):
         """
         do nothing.
         """
-        return
+        poolKey = self._getPoolKey()
+        connection = self._pool.get(poolKey)
+        if connection is not None:
+            connection._running.discard(self.name)
 
     def _failure(self, reason):
         """
@@ -332,7 +339,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @type reason: Twisted error instance
         """
         msg = reason.getErrorMessage()
-        reason.cleanFailure()
+#        reason.cleanFailure()
         if not msg: # Sometimes we get blank error messages
             msg = reason.__class__
         msg = '%s %s' % (self._devId, msg)
