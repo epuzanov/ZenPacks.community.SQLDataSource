@@ -44,9 +44,9 @@ except ImportError:
 
 SEM_POOL = {}
 
-def getSemaphore(name, size):
+def getSemaphore(conn):
     global SEM_POOL
-    return SEM_POOL.setdefault(name, defer.DeferredSemaphore(size))
+    return SEM_POOL.setdefault(conn.dbapiName,defer.DeferredSemaphore(conn.max))
 
 class TimeoutError(Exception):
     """
@@ -80,12 +80,6 @@ def parseConnectionString(cs='', options={}):
     kwargs.update(options)
     return args, kwargs
 
-class noLock:
-    def acquire(self):
-        return
-    def release(self):
-        return
-
 class adbapiClient(object):
 
     def __init__(self, cs):
@@ -96,7 +90,6 @@ class adbapiClient(object):
         self.cs = cs
         self._connection = None
         self._running = set()
-        self._lock = noLock()
         self._dbapi = None
 
     def __del__(self):
@@ -104,35 +97,26 @@ class adbapiClient(object):
             self.close()
 
     def connect(self, task=None):
-        try:
-            self._lock.acquire()
-            if task:
-                self._running.add(task)
-            if self._connection:
-                return
-            args, kwargs = parseConnectionString(self.cs)
-            if 'cp_min' not in kwargs:
-                kwargs['cp_min'] = 1
-            if 'cp_max' not in kwargs and args[0] in ('pywmidb',):
-                kwargs['cp_max'] = 1
-            self._connection = adbapi.ConnectionPool(*args, **kwargs)
-            self._dbapi = self._connection.dbapi
-        finally:
-            self._lock.release()
+        if task:
+            self._running.add(task)
+        if self._connection:
+            return
+        args, kwargs = parseConnectionString(self.cs)
+        self._connection = adbapi.ConnectionPool(*args, **kwargs)
+        semaphore = getSemaphore(self._connection)
+        self._connection.max = self._connection.min
+        self._connection.min = 1
+        self._dbapi = self._connection.dbapi
 
     def close(self, task=None):
-        try:
-            self._lock.acquire()
-            if task is None:
-                self._running.clear()
-            else:
-                self._running.discard(task)
-            if self._connection and not self._running:
-                self._connection.close()
-                self._connection = None
-                self._dbapi = None
-        finally:
-            self._lock.release()
+        if task is None:
+            self._running.clear()
+        else:
+            self._running.discard(task)
+        if self._connection and not self._running:
+            connection, self._connection = self._connection, None
+            connection.close()
+            self._dbapi = None
 
     def _convert(self, val, type):
         if val is None:
@@ -182,7 +166,8 @@ class adbapiClient(object):
         t.cancel()
         if not txn.description:
             return res
-        header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
+        header = [h[0].lower() for h in txn.description]
+        ct = [h[1] for h in txn.description]
         if set(columns).intersection(set(header)):
             varVal = False
         else:
@@ -208,7 +193,7 @@ class adbapiClient(object):
         """
         if not self._connection:
             raise Exception('Connection lost')
-        semaphore=getSemaphore(self._connection.dbapiName,self._connection.max)
+        semaphore = getSemaphore(self._connection)
         return semaphore.run(self._connection.runInteraction, self.runQuery,
                                         task.sqlp, task.columns, task.timeout)
 
@@ -216,18 +201,14 @@ class adbapiClient(object):
 class dbapiClient(adbapiClient):
 
     def connect(self):
-        try:
-            self._lock.acquire()
-            fl = []
-            args, kwargs = parseConnectionString(self.cs)
-            if '.' in args[0]:
-                fl.append(args[0].split('.')[-1])
-            dbapi = __import__(args[0], globals(), locals(), fl)
-            self._connection = dbapi.connect(*args[1:], **kwargs)
-            self._dbapi = dbapi
-            return self
-        finally:
-            self._lock.release()
+        fl = []
+        args, kwargs = parseConnectionString(self.cs)
+        if '.' in args[0]:
+            fl.append(args[0].split('.')[-1])
+        dbapi = __import__(args[0], globals(), locals(), fl)
+        self._connection = dbapi.connect(*args[1:], **kwargs)
+        self._dbapi = dbapi
+        return self
 
     def query(self, task):
         """
@@ -237,16 +218,15 @@ class dbapiClient(adbapiClient):
         @type task: DataSourceConfig
         """
         try:
-            self._lock.acquire()
             cursor = self._connection.cursor()
             try:
                 result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
             except Exception, ex:
+                self._connection.rollback()
                 result = Failure(ex)
         finally:
             try: cursor.close()
             except: pass
-            self._lock.release()
         return result
 
 

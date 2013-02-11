@@ -802,8 +802,8 @@ class wsmanCnx:
                 raise InterfaceError("SSL error: %s" % (arg,))
         finally:
             if self._connection is not None:
-                self._connection.close()
-                self._connection = None
+                _connection, self._connection = self._connection, None
+                _connection.close()
             if oldtimeout and oldtimeout != socket.getdefaulttimeout():
                 socket.setdefaulttimeout(oldtimeout)
             self._lock.release()
@@ -816,8 +816,8 @@ class wsmanCnx:
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
         if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+            _connection, self._connection = self._connection, None
+            _connection.close()
         self._conkwargs.clear()
 
     def commit(self):
@@ -834,8 +834,8 @@ class wsmanCnx:
         if not self._conkwargs:
             raise ProgrammingError("Connection closed.")
         if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+            _connection, self._connection = self._connection, None
+            _connection.close()
 
     def cursor(self):
         """

@@ -42,8 +42,10 @@ try:
 except:
     raise StandardError("Can't import pysamba modules. Please, install pysamba first.")
 from pysamba.wbem.wbem import *
-from pysamba.talloc import *
 from pysamba.version import VERSION as PSVERSION
+
+import logging
+log = logging.getLogger("zen.pywmidb")
 
 from distutils.version import StrictVersion
 if not getattr(WbemQualifier, "_fields_", None):
@@ -159,6 +161,51 @@ NUMBER = DBAPITypeObject(CIM_SINT8, CIM_UINT8, CIM_SINT16, CIM_UINT16,
 DATETIME = DBAPITypeObject(CIM_DATETIME)
 ROWID = DBAPITypeObject()
 
+def _datetime(v):
+    """
+    Convert string to datetime.
+    """
+    r = DTPAT.match(str(v.v_string))
+    if not r: return v.v_string
+    tt = map(int, r.groups(0))
+    if abs(tt[7]) > 30: minutes = tt[7]
+    elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+    else: minutes = 60 * tt[7] + tt[8]
+    return datetime(*tt[:7]) - timedelta(minutes=minutes)
+
+def _convertArray(arr):
+    """
+    Convert array value from CIMTYPE to python types.
+    """
+    if not arr: return None
+    return [arr.contents.item[i] for i in range(arr.contents.count)]
+
+TYPEFUNCT = {CIM_SINT8:lambda v:v.v_sint8, CIM_UINT8:lambda v:v.v_uint8,
+    CIM_SINT16:lambda v:v.v_sint16, CIM_UINT16:lambda v:v.v_uint16,
+    CIM_SINT32:lambda v:v.v_sint32, CIM_UINT32:lambda v:v.v_uint32,
+    CIM_SINT64:lambda v:v.v_sint64, CIM_UINT64:lambda v:v.v_uint64,
+    CIM_REAL32:lambda v:float(v.v_uint32),CIM_REAL64:lambda v:float(v.v_uint64),
+    CIM_OBJECT:lambda v:v.v_string, CIM_STRING:lambda v:v.v_string,
+    CIM_CHAR16:lambda v:v.v_string.decode('utf16'), CIM_DATETIME: _datetime,
+    CIM_BOOLEAN:lambda v: str(v).lower() == 'true',
+    CIM_REFERENCE:lambda v:v.v_string.startswith(r'\\') and v.v_string.split(
+        ':', 1)[-1] or v.v_string,
+    CIM_ARR_SINT8:lambda v:_convertArray(v.a_sint8),
+    CIM_ARR_UINT8:lambda v:_convertArray(v.a_uint8),
+    CIM_ARR_SINT16:lambda v:_convertArray(v.a_sint16),
+    CIM_ARR_UINT16:lambda v:_convertArray(v.a_uint16),
+    CIM_ARR_SINT32:lambda v:_convertArray(v.a_sint32),
+    CIM_ARR_UINT32:lambda v:_convertArray(v.a_uint32),
+    CIM_ARR_SINT64:lambda v:_convertArray(v.a_sint64),
+    CIM_ARR_UINT64:lambda v:_convertArray(v.a_uint64),
+    CIM_ARR_REAL32:lambda v:_convertArray(v.a_real32),
+    CIM_ARR_REAL64:lambda v:_convertArray(v.a_real64),
+    CIM_ARR_BOOLEAN:lambda v:_convertArray(v.a_boolean),
+    CIM_ARR_STRING:lambda v:_convertArray(v.a_string),
+    CIM_ARR_DATETIME:lambda v:_convertArray(v.a_datetime),
+    CIM_ARR_REFERENCE:lambda v:_convertArray(v.a_reference),
+    }
+
 ### module constants
 
 # compliant with DB SIG 2.0
@@ -223,7 +270,7 @@ class wmiCursor(object):
     def _check_executed(self):
         if not self._connection:
             raise ProgrammingError("Cursor closed.")
-        if not self._connection._ctx:
+        if not self._connection._creds:
             raise ProgrammingError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
@@ -253,7 +300,7 @@ class wmiCursor(object):
         """
         if not self._connection:
             raise ProgrammingError("Cursor closed.")
-        if not self._connection._ctx:
+        if not self._connection._creds:
             raise ProgrammingError("Connection closed.")
         del self._rows[:]
         self.rownumber = -1
@@ -368,105 +415,61 @@ class pysambaCnx:
         self._timeout = float(kwargs.get('timeout', 10))
         if self._timeout > 0: self._timeout = int(self._timeout * 1000)
         self._host = kwargs.get('host', 'localhost')
-        self._ctx = POINTER(com_context)()
-        self._pWS = POINTER(IWbemServices)()
-        self._pEnum = None
+        self._ctx = None
+        self._pWS = None
         self._wmibatchSize = int(kwargs.get('wmibatchSize', 5))
-        creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
-        ntlmv2 = kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no'
+        self._locale = kwargs.get('locale', None)
+        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._creds = '%s%%%s'%(kwargs.get('user',''),kwargs.get('password',''))
+        library.lp_do_parameter(-1, "client ntlmv2 auth",
+            kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no')
         self._lock = Lock()
+        self._connect()
+
+    def _connect(self):
         try:
             self._lock.acquire()
+            self._ctx = POINTER(com_context)()
+            self._pWS = POINTER(IWbemServices)()
             try:
-
                 library.com_init_ctx(byref(self._ctx), None)
-                library.dcom_client_init(self._ctx, None)
-                library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
-
+                cred = library.cli_credentials_init(self._ctx)
+                library.cli_credentials_set_conf(cred)
+                library.cli_credentials_parse_string(cred, self._creds, 5)
+                library.dcom_client_init(self._ctx, cred)
                 flags = uint32_t()
                 flags.value = 0
                 result = library.WBEM_ConnectServer(
                             self._ctx,                             # com_ctx
                             self._host,                            # server
-                            kwargs.get('namespace', 'root/cimv2'), # namespace
-                            kwargs.get('user', ''),                # user
-                            kwargs.get('password', ''),            # password
-                            kwargs.get('locale', None),            # locale
+                            self._namespace,                       # namespace
+                            None,                                  # user
+                            None,                                  # password
+                            self._locale,                          # locale
                             flags.value,                           # flags
                             None,                                  # authority 
                             None,                                  # wbem_ctx
                             byref(self._pWS))                      # services 
                 WERR_CHECK(result, self._host, "Connect")
             except Exception, e:
-                self._close()
+                self.close()
                 raise InterfaceError(e)
         finally: self._lock.release()
-
-    def _convertArray(self, arr):
-        """
-        Convert array value from CIMTYPE to python types.
-        """
-        if not arr: return None
-        return [arr.contents.item[i] for i in range(arr.contents.count)]
-
-    def _convert(self, v, typeval):
-        """
-        Convert value from CIMTYPE to python types.
-        """
-        if typeval == CIM_SINT8: return v.v_sint8
-        if typeval == CIM_UINT8: return v.v_uint8
-        if typeval == CIM_SINT16: return v.v_sint16
-        if typeval == CIM_UINT16: return v.v_uint16
-        if typeval == CIM_SINT32: return v.v_sint32
-        if typeval == CIM_UINT32: return v.v_uint32
-        if typeval == CIM_SINT64: return v.v_sint64
-        if typeval == CIM_UINT64: return v.v_sint64
-        if typeval == CIM_REAL32: return float(v.v_uint32)
-        if typeval == CIM_REAL64: return float(v.v_uint64)
-        if typeval == CIM_BOOLEAN: return bool(v.v_boolean)
-        if typeval == CIM_REFERENCE:
-            if not v.v_string.startswith(r'\\'): return v.v_string
-            return v.v_string.split(':', 1)[-1]
-        if typeval == CIM_STRING: return v.v_string
-        if typeval == CIM_CHAR16: return v.v_string.decode('utf16')
-        if typeval == CIM_OBJECT: return v.v_string
-        if typeval == CIM_DATETIME:
-            r = DTPAT.match(str(v.v_string))
-            if not r: return v.v_string
-            tt = map(int, r.groups(0))
-            if abs(tt[7]) > 30: minutes = tt[7]
-            elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
-            else: minutes = 60 * tt[7] + tt[8]
-            return datetime(*tt[:7]) - timedelta(minutes=minutes)
-        if typeval == CIM_ARR_SINT8: return self._convertArray(v.a_sint8)
-        if typeval == CIM_ARR_UINT8: return self._convertArray(v.a_uint8)
-        if typeval == CIM_ARR_SINT16: return self._convertArray(v.a_sint16)
-        if typeval == CIM_ARR_UINT16: return self._convertArray(v.a_uint16)
-        if typeval == CIM_ARR_SINT32: return self._convertArray(v.a_sint32)
-        if typeval == CIM_ARR_UINT32: return self._convertArray(v.a_uint32)
-        if typeval == CIM_ARR_SINT64: return self._convertArray(v.a_sint64)
-        if typeval == CIM_ARR_UINT64: return self._convertArray(v.a_uint64)
-        if typeval == CIM_ARR_REAL32: return self._convertArray(v.a_real32)
-        if typeval == CIM_ARR_REAL64: return self._convertArray(v.a_real64)
-        if typeval == CIM_ARR_BOOLEAN: return self._convertArray(v.a_boolean)
-        if typeval == CIM_ARR_STRING: return self._convertArray(v.a_string)
-        if typeval == CIM_ARR_DATETIME:
-            return self._convertArray(v.contents.a_datetime)
-        if typeval == CIM_ARR_REFERENCE:
-            return self._convertArray(v.contents.a_reference)
-        return "Unsupported"
 
     def _execQuery(self, operation):
         """
         Executes WQL query
         """
+        pEnum = None
+        if self._creds and not self._ctx:
+            self._connect()
         try:
             self._lock.acquire()
             dDict = {}
             kbs = {}
             rows = []
             result = None
-            self._pEnum = POINTER(IEnumWbemClassObject)()
+            pEnum = POINTER(IEnumWbemClassObject)()
             ocount = uint32_t()
             ocount.value = self._wmibatchSize
             props, classname, where = WQLPAT.match(operation).groups('')
@@ -482,6 +485,7 @@ class pysambaCnx:
                 except: kbs.clear()
             props = props.upper().replace(' ','').split(',')
             if '*' in props: props.remove('*')
+            log.debug('send query: %s', operation)
             result = library.IWbemServices_ExecQuery(
                             self._pWS,
                             self._ctx,
@@ -491,35 +495,37 @@ class pysambaCnx:
                             WBEM_FLAG_RETURN_IMMEDIATELY | \
                             WBEM_FLAG_ENSURE_LOCATABLE,
                             None,
-                            byref(self._pEnum))
+                            byref(pEnum))
             WERR_CHECK(result, self._host, "ExecQuery")
-#            result = library.IEnumWbemClassObject_Reset(self._pEnum, self._ctx)
-#            WERR_CHECK(result, self._host, "Reset result of WMI query.")
+            log.debug('received enumerator: %s', pEnum)
             while ocount.value == self._wmibatchSize:
                 ocount = uint32_t()
                 objs = (POINTER(WbemClassObject) * self._wmibatchSize)()
+                log.debug('send smart next to: %s', pEnum)
                 result = library.IEnumWbemClassObject_SmartNext(
-                            self._pEnum,
+                            pEnum,
                             self._ctx,
                             self._timeout,
                             self._wmibatchSize,
                             objs,
                             byref(ocount))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
+                log.debug('retrive result for: %s', pEnum)
                 for i in range(ocount.value):
-                    iPath = []
                     try:
                         klass = objs[i].contents.obj_class.contents
                         inst = objs[i].contents.instance.contents
                         pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
                                 '__NAMESPACE':getattr(objs[i].contents,
-                                '__NAMESPACE','').replace('\\','/')}
+                                '__NAMESPACE','').replace('\\','/'),
+                                '__PATH':'%s.'%getattr(klass, '__CLASS', '')}
                         for j in range(getattr(klass, '__PROPERTY_COUNT')):
                             prop = klass.properties[j]
                             if not prop.name: continue
                             uName = prop.name.upper()
                             pType = prop.desc.contents.cimtype & CIM_TYPEMASK
-                            pVal = self._convert(inst.data[j], pType)
+                            pVal = TYPEFUNCT.get(pType,
+                                lambda v:v.v_string)(inst.data[j])
                             pdict[uName] = pVal
                             if kbs.get(prop.name, pVal) != pVal:
                                 pdict.clear()
@@ -530,23 +536,20 @@ class pysambaCnx:
                             for k in range(prop.desc.contents.qualifiers.count):
                                 q=prop.desc.contents.qualifiers.item[k].contents
                                 if q.name == 'MaxLen' and not rows:
-                                    maxlen = self._convert(q.value, q.cimtype)
+                                    maxlen = TYPEFUNCT.get(q.cimtype,
+                                        lambda v:v.v_string)(q.value)
                                 if q.name in ['key']:
-                                    if pType == NUMBER:
-                                        iPath.append('%s=%s'%(prop.name, pVal))
-                                    else:
-                                        iPath.append('%s="%s"'%(prop.name,pVal))
+                                    if pType != NUMBER:
+                                        pVal = '"%s"'%pVal
+                                    pdict['__PATH'] += '%s=%s,'%(prop.name,pVal)
                             if uName not in dDict:
-                                dDict[uName] = (prop.name,
-                                    prop.desc.contents.cimtype & CIM_TYPEMASK,
+                                dDict[uName] = (prop.name, pType,
                                     maxlen, maxlen, None, None, None)
-                        if iPath:
-                            pdict['__PATH'] = '%s.%s'%(pdict['__CLASS'],
-                                                        ','.join(iPath))
                         if pdict:
+                            pdict['__PATH'] = pdict['__PATH'][:-1]
                             rows.append(pdict)
                     finally:
-                        talloc_free(objs[i])
+                        library.talloc_free(objs[i])
             if not props and dDict:
                 props = dDict.keys() + ['__PATH', '__CLASS', '__NAMESPACE']
             description = tuple([dDict.get(p,(p, 8, None, None, None,
@@ -554,35 +557,26 @@ class pysambaCnx:
             result = [tuple([pd.get(p, None) for p in props]) for pd in rows]
             return description, result
         finally:
+            if pEnum:
+                result = library.IUnknown_Release(pEnum, self._ctx)
+                pEnum = None
             self._lock.release()
-            if self._pEnum:
-                result = library.IUnknown_Release(self._pEnum, self._ctx)
-                self._pEnum = None
 
     def __del__(self):
         if self._ctx:
             self.close()
 
-    def _close(self):
-        """
-        Close connection to the WMI CIMOM. Implicitly rolls back
-        """
-        if self._ctx is not None:
-            talloc_free(self._ctx)
-            self._pWS = None
-            self._ctx = None
-
     def close(self):
         """
         Close connection to the WMI CIMOM. Implicitly rolls back
         """
-        if self._pEnum:
-            result = library.IUnknown_Release(self._pEnum, self._ctx)
-            self._pEnum = None
-        try:
-            self._lock.acquire()
-            self._close()
-        finally: self._lock.release()
+        self._creds = None
+        self._pWS = None
+        if self._ctx:
+            log.debug('clean context: %s', self._ctx)
+            _ctx, self._ctx = self._ctx, None
+            library.talloc_free(_ctx)
+        log.debug('connection: %s - closed', self)
 
     def commit(self):
         """
@@ -595,9 +589,12 @@ class pysambaCnx:
         """
         Roll back transaction which is currently in progress.
         """
-        if self._pEnum:
-            result = library.IUnknown_Release(self._pEnum, self._ctx)
-            self._pEnum = None
+        log.debug('rollback connection: %s', self)
+        self._pWS = None
+        if self._ctx:
+            log.debug('clean context: %s', self._ctx)
+            _ctx, self._ctx = self._ctx, None
+            library.talloc_free(_ctx)
 
     def cursor(self):
         """

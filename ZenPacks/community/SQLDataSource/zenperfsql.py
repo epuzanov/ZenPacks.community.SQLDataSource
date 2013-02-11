@@ -260,6 +260,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         return "SQL schedule Name: %s configId: %s Datasources: %d" % (
                self.name, self.configId, len(self._datasources))
 
+    def __del__(self):
+        self._close()
+        self._cleanUpPool()
+
     def cleanup(self):
         self._close()
         return POOL_LOCK.run(self._cleanUpPool)
