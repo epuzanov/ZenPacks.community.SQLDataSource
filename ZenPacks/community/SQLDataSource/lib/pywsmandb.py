@@ -704,7 +704,7 @@ class wsmanCnx:
 
     def __init__(self, *args, **kwargs):
         self._connection = None
-        self._timeout = float(kwargs.get('timeout', 10))
+        self._timeout = float(kwargs.get('timeout', 60))
         self._scheme = str(kwargs.get('scheme', 'https')).lower()
         self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',

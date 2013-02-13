@@ -602,7 +602,7 @@ class pywbemCnx:
     """
     def __init__(self, *args, **kwargs):
         self._connection = None
-        self._timeout = float(kwargs.get('timeout', 10))
+        self._timeout = float(kwargs.get('timeout', 60))
         self._dialect = kwargs.get('dialect', '').upper()
         self._scheme = str(kwargs.get('scheme', 'https')).lower()
         self._conkwargs = {

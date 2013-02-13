@@ -412,7 +412,7 @@ class pysambaCnx:
     """
 
     def __init__(self, *args, **kwargs):
-        self._timeout = float(kwargs.get('timeout', 10))
+        self._timeout = float(kwargs.get('timeout', 30))
         if self._timeout > 0: self._timeout = int(self._timeout * 1000)
         self._host = kwargs.get('host', 'localhost')
         self._ctx = None

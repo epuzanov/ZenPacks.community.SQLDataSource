@@ -102,10 +102,11 @@ class adbapiClient(object):
         if self._connection:
             return
         args, kwargs = parseConnectionString(self.cs)
+        if 'cp_min' not in kwargs:
+            kwargs['cp_min'] = 1
         self._connection = adbapi.ConnectionPool(*args, **kwargs)
         semaphore = getSemaphore(self._connection)
         self._connection.max = self._connection.min
-        self._connection.min = 1
         self._dbapi = self._connection.dbapi
 
     def close(self, task=None):
