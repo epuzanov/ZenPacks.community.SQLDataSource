@@ -501,7 +501,7 @@ class pysambaCnx:
             while ocount.value == self._wmibatchSize:
                 ocount = uint32_t()
                 objs = (POINTER(WbemClassObject) * self._wmibatchSize)()
-                log.debug('send smart next to: %s', pEnum)
+                log.debug('send SmartNext for enumerator: %s', pEnum)
                 result = library.IEnumWbemClassObject_SmartNext(
                             pEnum,
                             self._ctx,
@@ -510,7 +510,7 @@ class pysambaCnx:
                             objs,
                             byref(ocount))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
-                log.debug('retrive result for: %s', pEnum)
+                log.debug('retrive result from enumerator: %s', pEnum)
                 for i in range(ocount.value):
                     try:
                         klass = objs[i].contents.obj_class.contents

@@ -62,8 +62,6 @@ unused(DeviceProxy)
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
 
-POOL_LOCK = defer.DeferredLock()
-
 #
 # RPN reverse calculation
 #
@@ -260,13 +258,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         return "SQL schedule Name: %s configId: %s Datasources: %d" % (
                self.name, self.configId, len(self._datasources))
 
-    def __del__(self):
-        self._close()
-        self._cleanUpPool()
-
     def cleanup(self):
         self._close()
-        return POOL_LOCK.run(self._cleanUpPool)
+        self._cleanUpPool()
 
     def _getPoolKey(self):
         """
@@ -286,6 +280,13 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                 connection.close()
             if connection._connection is None:
                 del self._pool[poolKey]
+        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
+        # tasks cleanup.
+        # Workaround start
+        if ZVERSION < '3.0.0':
+            self._pool = None
+            self.state = TaskStates.STATE_IDLE
+        # Workaround end
 
     def doTask(self):
         """
@@ -295,8 +296,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @return: Deferred actions to run against a device configuration
         @rtype: Twisted deferred object
         """
+        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
+        # tasks cleanup.
+        if self._pool is None:
+            return defer.fail("Task cleaned")
         # See if we need to connect first before doing any collection
-        d = POOL_LOCK.run(self._connect)
+        d = defer.maybeDeferred(self._connect)
         d.addCallback(self._fetchPerf)
         d.addErrback(self._failure)
 
@@ -312,15 +317,12 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         pool dictionary, if not create a new ConnectionPool.
         """
         poolKey = self._getPoolKey()
-        connection = self._pool.get(poolKey)
-        if connection is None:
-            self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-            log.debug("Creating ConnectionPool: %s%s", poolKey,
-                self._preferences.options.showconnectionstring and \
-                ", connection string: %s"%self._connectionString or "")
-            connection = adbapiClient(self._connectionString)
-            self._pool[poolKey] = connection
-        connection.connect(self.name)
+        self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
+        log.debug("Creating ConnectionPool: %s%s", poolKey,
+                    self._preferences.options.showconnectionstring and \
+                    ", connection string: %s"%self._connectionString or "")
+        connection = self._pool.setdefault(poolKey,
+                        adbapiClient(self._connectionString)).connect(self.name)
         if not connection._connection:
             del self._pool[poolKey]
             raise Exception('Connection lost')
@@ -343,7 +345,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @type reason: Twisted error instance
         """
         msg = reason.getErrorMessage()
-#        reason.cleanFailure()
         if not msg: # Sometimes we get blank error messages
             msg = reason.__class__
         msg = '%s %s' % (self._devId, msg)

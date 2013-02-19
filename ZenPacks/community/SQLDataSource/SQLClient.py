@@ -44,9 +44,11 @@ except ImportError:
 
 SEM_POOL = {}
 
-def getSemaphore(conn):
+def getSemaphore(conn, connmax=None):
     global SEM_POOL
-    return SEM_POOL.setdefault(conn.dbapiName,defer.DeferredSemaphore(conn.max))
+    if connmax is None:
+        connmax = conn.max
+    return SEM_POOL.setdefault(conn.dbapiName, defer.DeferredSemaphore(connmax))
 
 class TimeoutError(Exception):
     """
@@ -100,14 +102,16 @@ class adbapiClient(object):
         if task:
             self._running.add(task)
         if self._connection:
-            return
+            return self
         args, kwargs = parseConnectionString(self.cs)
         if 'cp_min' not in kwargs:
             kwargs['cp_min'] = 1
+        connmax = kwargs.get('cp_max', 5)
+        kwargs['cp_max'] = kwargs['cp_min']
         self._connection = adbapi.ConnectionPool(*args, **kwargs)
-        semaphore = getSemaphore(self._connection)
-        self._connection.max = self._connection.min
+        semaphore = getSemaphore(self._connection, connmax)
         self._dbapi = self._connection.dbapi
+        return self
 
     def close(self, task=None):
         if task is None:
