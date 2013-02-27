@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2010-2012 Egor Puzanov.
+# Copyright (C) 2010-2013 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,13 +12,13 @@ __doc__="""SQLPlugin
 
 wrapper for PythonPlugin
 
-$Id: SQLPlugin.py,v 3.2 2012/04/20 00:58:56 egor Exp $"""
+$Id: SQLPlugin.py,v 3.4 2013/02/27 22:44:04 egor Exp $"""
 
-__version__ = "$Revision: 3.2 $"[11:-2]
+__version__ = "$Revision: 3.4 $"[11:-2]
 
 from Products.DataCollector.plugins.CollectorPlugin import CollectorPlugin
 from Products.ZenUtils.ZenTales import talesEval
-from ZenPacks.community.SQLDataSource.SQLClient import SQLClient
+from ZenPacks.community.SQLDataSource.SQLClient import SQLClient, getPool
 from twisted.internet.defer import Deferred
 
 class SQLPlugin(CollectorPlugin):
@@ -28,6 +28,7 @@ class SQLPlugin(CollectorPlugin):
     """
     transport = "python"
     tables = {}
+    _pool = getPool('modeler devices')
     deviceProperties = CollectorPlugin.deviceProperties  +  ('zWinUser',
                                                             'zWinPassword',
                                                             )
@@ -54,16 +55,21 @@ class SQLPlugin(CollectorPlugin):
         return self.queries(device)
 
     def clientFinished(self, client):
-        for plugin, results in client.getResults():
-            if plugin == self: break
-        else:
-            results = []
-        client.deferred.callback(results)
-        client = None
+        results = client.getResults()
+        while results:
+            plugin, result = results.pop(0)
+            plugin.deferred.callback(result)
+        poolKey = client.hostname
+        if poolKey in self._pool:
+            self._pool[poolKey] = None
+            del self._pool[poolKey] 
 
     def collect(self, device, log):
-        deferred = Deferred()
-        cl = SQLClient(device, datacollector=self, plugins=[self])
-        setattr(cl, 'deferred', deferred)
+        self.deferred = Deferred()
+        cl = self._pool.get(device.id)
+        if cl is None:
+            cl = SQLClient(device, datacollector=self)
+            self._pool[device.id] = cl
+        cl.plugins.append(self)
         cl.run()
-        return deferred
+        return self.deferred

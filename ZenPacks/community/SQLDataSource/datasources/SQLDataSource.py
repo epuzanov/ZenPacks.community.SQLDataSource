@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2010-2012 Egor Puzanov.
+# Copyright (C) 2010-2013 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -13,9 +13,9 @@ __doc__="""SQLDataSource
 Defines attributes for how a datasource will be graphed
 and builds the nessesary DEF and CDEF statements for it.
 
-$Id: SQLDataSource.py,v 2.15 2012/10/17 18:03:09 egor Exp $"""
+$Id: SQLDataSource.py,v 2.17 2013/02/27 22:46:09 egor Exp $"""
 
-__version__ = "$Revision: 2.15 $"[11:-2]
+__version__ = "$Revision: 2.17 $"[11:-2]
 
 from Products.ZenModel.RRDDataSource import RRDDataSource
 from Products.ZenModel.ZenPackPersistence import ZenPackPersistence
@@ -104,9 +104,9 @@ class SQLDataSource(ZenPackPersistence, RRDDataSource):
         if where_e: where_e = where_e.start() + where_s
         else: where_e = len(sql)
         try:
-            where = re.compile(' AND ', re.I).sub(',', sql[where_s:where_e])
-            kbs = eval('(lambda **kws:kws)(%s)'%where.encode('string-escape'
-                                ).replace('=""', '="\\"').replace('""', '\\""'))
+            where = re.compile(' AND ', re.I).sub(',',
+                                sql[where_s:where_e].encode('unicode-escape'))
+            kbs = eval('(lambda **kws:kws)(%s)'%where)
             FROMPAT = re.compile('[%s]\]?(\s+)FROM\s'%'|'.join(
                                     [(dp.getAliasNames() or [dp.id])[0] \
                                     for dp in self.getRRDDataPoints()]), re.I)

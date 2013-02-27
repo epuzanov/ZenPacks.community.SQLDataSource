@@ -1,7 +1,7 @@
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
-# Copyright (C) 2009-2012 Egor Puzanov.
+# Copyright (C) 2009-2013 Egor Puzanov.
 #
 # This program can be used under the GNU General Public License version 2
 # You can find full information here: http://www.zenoss.com/oss
@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.13 2012/10/17 18:04:07 egor Exp $"""
+$Id: SQLClient.py,v 3.15 2013/02/27 22:43:17 egor Exp $"""
 
-__version__ = "$Revision: 3.13 $"[11:-2]
+__version__ = "$Revision: 3.15 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -27,16 +27,28 @@ from twisted.python.failure import Failure
 from twisted.enterprise import adbapi
 from twisted.spread import pb
 
-from threading import Timer
+import threading
 import sys
 import re
 
 try:
     from Products.ZenCollector.pools import getPool
 except ImportError:
-    ADBAPIPOOLS = {}
+    ADBAPICLIENT_POOL = {}
+    SQLCLIENT_POOL = {}
     def getPool(name, factory=None):
-        return ADBAPIPOOLS
+        if name == 'adbapi connections':
+            return ADBAPICLIENT_POOL
+        else:
+            return SQLCLIENT_POOL
+
+SEM_POOL = {}
+
+def getSemaphore(conn, connmax=None):
+    global SEM_POOL
+    if connmax is None:
+        connmax = conn.max
+    return SEM_POOL.setdefault(conn.dbapiName, defer.DeferredSemaphore(connmax))
 
 class TimeoutError(Exception):
     """
@@ -78,30 +90,38 @@ class adbapiClient(object):
         @param cs: connection string
         """
         self.cs = cs
-        self._dbapi = None
         self._connection = None
-        self.ready = None
+        self._running = set()
+        self._dbapi = None
 
-    def connect(self):
-        try:
-            args, kwargs = parseConnectionString(self.cs)
-            self._connection = adbapi.ConnectionPool(*args, **kwargs)
-            self._dbapi = self._connection.dbapi
-            self.ready = True
-            return defer.succeed(self)
-        except Exception, ex:
-            return defer.fail(ex)
-
-    def close(self):
+    def __del__(self):
         if self._connection:
-            self._connection.close()
-            self._connection = None
-        self.ready = None
+            self.close()
 
-    def _timeout(self, txn):
-        if hasattr(txn._connection, 'cancel'):
-            txn._connection.cancel()
-        txn._cursor.close()
+    def connect(self, task=None):
+        if task:
+            self._running.add(task)
+        if self._connection:
+            return self
+        args, kwargs = parseConnectionString(self.cs)
+        if 'cp_min' not in kwargs:
+            kwargs['cp_min'] = 1
+        connmax = kwargs.get('cp_max', 5)
+        kwargs['cp_max'] = kwargs['cp_min']
+        self._connection = adbapi.ConnectionPool(*args, **kwargs)
+        semaphore = getSemaphore(self._connection, connmax)
+        self._dbapi = self._connection.dbapi
+        return self
+
+    def close(self, task=None):
+        if task is None:
+            self._running.clear()
+        else:
+            self._running.discard(task)
+        if self._connection and not self._running:
+            connection, self._connection = self._connection, None
+            connection.close()
+            self._dbapi = None
 
     def _convert(self, val, type):
         if val is None:
@@ -131,7 +151,12 @@ class adbapiClient(object):
         @type timeout: int
         """
         res = []
-        t = Timer(timeout, self._timeout, txn)
+        def _timeout():
+            if hasattr(txn, '_cursor'):
+                txn._cursor.close()
+            else:
+                txn.close()
+        t = threading.Timer(timeout, _timeout)
         t.start()
         try:
             for q in re.split('[ \n]go[ \n]|;[ \n]', sql, re.I):
@@ -146,7 +171,8 @@ class adbapiClient(object):
         t.cancel()
         if not txn.description:
             return res
-        header, ct = zip(*[(h[0].lower(), h[1]) for h in txn.description])
+        header = [h[0].lower() for h in txn.description]
+        ct = [h[1] for h in txn.description]
         if set(columns).intersection(set(header)):
             varVal = False
         else:
@@ -170,8 +196,11 @@ class adbapiClient(object):
         @param task: task to run
         @type task: DataSourceConfig
         """
-        return self._connection.runInteraction(self.runQuery, task.sqlp,
-                                                task.columns, task.timeout)
+        if not self._connection:
+            raise Exception('Connection lost')
+        semaphore = getSemaphore(self._connection)
+        return semaphore.run(self._connection.runInteraction, self.runQuery,
+                                        task.sqlp, task.columns, task.timeout)
 
 
 class dbapiClient(adbapiClient):
@@ -182,15 +211,9 @@ class dbapiClient(adbapiClient):
         if '.' in args[0]:
             fl.append(args[0].split('.')[-1])
         dbapi = __import__(args[0], globals(), locals(), fl)
-        self._dbapi = dbapi
         self._connection = dbapi.connect(*args[1:], **kwargs)
-        self.ready = True
+        self._dbapi = dbapi
         return self
-
-    def _timeout(self, txn):
-        if hasattr(self._connection, 'cancel'):
-            self._connection.cancel()
-        txn.close()
 
     def query(self, task):
         """
@@ -201,121 +224,16 @@ class dbapiClient(adbapiClient):
         """
         try:
             cursor = self._connection.cursor()
-            result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
-            cursor.close()
-        except Exception, ex:
-            result = Failure(ex)
+            try:
+                result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
+            except Exception, ex:
+                self._connection.rollback()
+                result = Failure(ex)
+        finally:
+            try: cursor.close()
+            except: pass
         return result
 
-class adbapiExecutor(object):
-    """
-    Runs up to N queries at a time.  N is determined by the maxParrallel
-    used to construct an instance, unlimited by default.
-    """
-    def __init__(self, maxParrallel=1):
-        self._max = maxParrallel
-        self._running = 0
-        self._taskQueue = []
-        self._connection = None
-        self._cs = None
-
-    def setMax(self, max):
-        self._max = max
-        reactor.callLater(0, self._runTask)
-
-    def getMax(self):
-        return self._max
-
-    @property
-    def running(self):
-        return self._running
-
-    @property
-    def queued(self):
-        return len(self._taskQueue)
-
-    def submit(self, task):
-        """
-        submit a query to be executed. A deferred will be returned with the
-        the result of the query.
-
-        @param task: task to be executed
-        @type task: DataSourceConfig
-        """
-        deferred = defer.Deferred()
-        deferred.addBoth(self._taskFinished, task)
-        task.result = deferred
-        self._taskQueue.append(task)
-        reactor.callLater(2, self._runTask)
-        return deferred
-
-    def _connect(self, task):
-        if self._connection:
-            if self._cs == task.connectionString:
-                return defer.succeed(self._connection)
-            else:
-                self._connection.close()
-                self._connection = None
-        self._cs = task.connectionString
-        self._connection = adbapiClient(task.connectionString)
-        return defer.maybeDeferred(self._connection.connect)
-
-    def _connected(self, connection, task):
-        self._connection.ready = True
-        d = self._connection.query(task)
-        d.addBoth(self._finished, task)
-        return d
-
-    def _runTask(self):
-        if not self._taskQueue or self._running >= self._max:
-            return
-        self._running += 1
-        task = self._taskQueue[0]
-        d = self._connect(task)
-        d.addCallback(self._connected, task)
-        d.addErrback(self._finished, task)
-        reactor.callLater(0, self._runTask)
-
-    def _finished(self, results, currentTask):
-        cTask = (currentTask.sqlp, str(currentTask.columns))
-        nextTask = 0
-        if isinstance(results, Failure):
-            results.cleanFailure()
-        for i in reversed(range(len(self._taskQueue))):
-            if self._cs != self._taskQueue[i].connectionString: continue
-            if (self._taskQueue[i].sqlp,str(self._taskQueue[i].columns))!=cTask:
-                nextTask = i
-                continue
-            if nextTask > 0: nextTask -= 1
-            task = self._taskQueue.pop(i)
-            if isinstance(results, Failure):
-                task.result.errback(results.getErrorMessage())
-                continue
-            if task.keybindings:
-                kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
-                                    for k in task.keybindings.iteritems()])
-                kv = ''.join(kv)
-            else: kc, kv = (), ''
-            result = []
-            for row in results:
-                if kv == ''.join([str(row.get(k) or '').strip() for k in kc]
-                    ).lower(): result.append(row)
-            task.result.callback(result)
-        if self._taskQueue:
-            if nextTask > 0:
-                self._taskQueue.insert(0, self._taskQueue.pop(nextTask))
-
-    def _taskFinished(self, result, task):
-        if self._running > 0:
-            self._running -= 1
-        if not self._taskQueue and self._running < 1:
-            if hasattr(self._connection, 'close'):
-                self._connection.close()
-            self._connection = None
-            self._cs = None
-        reactor.callLater(0, self._runTask)
-        task.result = result
-        return task
 
 class DataPointConfig(pb.Copyable, pb.RemoteCopy):
     """
@@ -417,7 +335,6 @@ class SQLClient(BaseClient):
     Implement the DataCollector Client interface for Python DB-API
     """
 
-
     def __init__(self, device=None, datacollector=None, plugins=[]):
         """
         Initializer
@@ -434,8 +351,15 @@ class SQLClient(BaseClient):
         self.hostname = getattr(device, 'id', 'unknown')
         self.plugins = plugins
         self.results = []
-        self._pools = getPool('adbapi executors')
+        self._running = False
+        self._taskQueue = []
+        self._pool = getPool('adbapi connections')
 
+    def __del__(self):
+        del self.results[:]
+        del self.plugins[:]
+        del self._taskQueue[:]
+        self._pool = None
 
     def query(self, queries):
         """
@@ -454,63 +378,97 @@ class SQLClient(BaseClient):
             if not client.connect(): continue
             for table, task in csTasks:
                 dsc = DataSourceConfig(*task)
-                dsc.result = client.query(dsc)
-                t,result = self.parseResult(dsc,'',table,client._dbapi.__name__)
+                result = client.query(dsc)
+                t, result = self.parseResult(result, dsc, '', table)
                 results[table] = result
             client.close()
             client = None
         return results
 
+    def _runTask(self):
+        if not self._taskQueue:
+            return self.clientFinished()
+        if not self._running:
+            self._running = True
+            dsc = self._taskQueue[0]
+            poolKey = hash(dsc.connectionString)
+            connection = self._pool.get(poolKey)
+            if connection is None:
+                connection = adbapiClient(dsc.connectionString)
+                connection.connect(hash(self))
+                self._pool[poolKey] = connection
+            d = connection.query(dsc)
+            d.addBoth(self._finished, dsc)
+            reactor.callLater(0, self._runTask)
+
+    def _finished(self, results, currentTask):
+        cTask = (currentTask.connectionString, currentTask.sqlp,
+                                                    str(currentTask.columns))
+        if isinstance(results, Failure):
+            results.cleanFailure()
+        for i in reversed(range(len(self._taskQueue))):
+            if (self._taskQueue[i].connectionString, self._taskQueue[i].sqlp,
+                            str(self._taskQueue[i].columns)) != cTask: continue
+            task = self._taskQueue.pop(i)
+            if isinstance(results, Failure):
+                task.result.errback(results.getErrorMessage())
+                continue
+            if task.keybindings:
+                kc, kv = zip(*[map(lambda v: str(v).strip().lower(), k) \
+                                    for k in task.keybindings.iteritems()])
+                kv = ''.join(kv)
+            else: kc, kv = (), ''
+            result = []
+            for row in results:
+                if ''.join([str(row.get(k) or '').strip() for k in kc]
+                                                    ).lower() != kv: continue
+                result.append(row)
+            task.result.callback(result)
+        self._running = False
+        reactor.callLater(0, self._runTask)
 
     def run(self):
         """
         Start SQL collection.
         """
-        deferreds = []
-        for plugin in self.plugins:
-            log.debug("Running collection for plugin %s", plugin.name())
+        while self.plugins:
             tasks = []
+            plugin = self.plugins.pop(0)
+            log.debug("Running collection for plugin %s", plugin.name())
             for table, task in plugin.prepareQueries(self.device).iteritems():
                 dsc = DataSourceConfig(*task)
-                dbapiName = dsc.connectionString.split(',', 1)[0].strip('\'"')
-                executor = self._pools.setdefault(dbapiName, adbapiExecutor())
-                deferred = executor.submit(dsc)
-                deferred.addBoth(self.parseResult,plugin.name(),table,dbapiName)
-                tasks.append(deferred)
-            tdl = defer.DeferredList(tasks)
-            deferreds.append(tdl)
+                dsc.result = defer.Deferred()
+                dsc.result.addBoth(self.parseResult, dsc, plugin.name(), table)
+                self._taskQueue.append(dsc)
+                tasks.append(dsc.result)
+            tdl = defer.gatherResults(tasks)
             tdl.addBoth(self.collectComplete, plugin)
-        dl = defer.DeferredList(deferreds)
-        dl.addBoth(self.collectComplete, None)
+        reactor.callLater(2, self._runTask)
 
-
-    def parseResult(self, datasource, pName, table, dbapiName):
+    def parseResult(self, result, datasource, pName, table):
         """
         Twisted deferred callback used to store the
         results of the collection run
 
-        @param r: result from the collection run
-        @type r: result
+        @param result: result from the collection run
+        @type result: list
+        @param datasource: data source config
+        @type datasource: DataSourceConfig
+        @param pName: plugin name
+        @type pName: string
         @param table: tables name
         @type table: string
-        @param dbapiName: Python DB-API modules name
-        @type dbapiName: string
         """
-        if dbapiName in self._pools and self._pools[dbapiName]._running < 1:
-            self._pools[dbapiName] = None
-            del self._pools[dbapiName]
-        if isinstance(datasource.result, Failure):
+        if isinstance(result, Failure):
             log.warn('Error in %s query "%s": %s', pName, datasource.sql,
-                                            datasource.result.getErrorMessage())
-            return (table, datasource.result)
+                                                    result.getErrorMessage())
+            return (table, result)
         log.debug('Results for %s query "%s": %s', pName, datasource.sql,
-                                                        str(datasource.result))
+                                                                    str(result))
         if datasource.points:
-            r = [dict([(p.id,row.get(p.alias,'')) for p in datasource.points]) \
-                                                for row in datasource.result]
-        else:
-            r = datasource.result
-        return (table, r)
+            result = [dict([(p.id,row.get(p.alias,'')) \
+                                for p in datasource.points]) for row in result]
+        return (table, result)
 
 
     def collectComplete(self, r, plugin):
@@ -523,14 +481,10 @@ class SQLClient(BaseClient):
         @param plugin: DBAPI-based performance data collector plugin
         @type plugin: plugin object
         """
-        if plugin is None:
-            self.clientFinished()
-            return
-
         results = {}
         errors = 0
         errmsg = ''
-        for success, (table, result) in r:
+        for table, result in r:
             if isinstance(result, Failure):
                 results[table] = []
                 errors += 1
@@ -548,6 +502,11 @@ class SQLClient(BaseClient):
         Stop the collection of performance data
         """
         log.info("SQL client finished collection for %s" % self.hostname)
+        for poolKey in self._pool.keys():
+            if hash(self) in getattr(self._pool.get(poolKey), '_running', []):
+                self._pool[poolKey].close(hash(self))
+            if not getattr(self._pool.get(poolKey), '_connection',  True):
+                del self._pool[poolKey]
         if self.datacollector:
             self.datacollector.clientFinished(self)
 
