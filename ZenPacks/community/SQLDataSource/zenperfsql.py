@@ -1,4 +1,3 @@
-
 ################################################################################
 #
 # This program is part of the SQLDataSource Zenpack for Zenoss.
@@ -13,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.13 2013/02/27 22:37:51 egor Exp $"""
+$Id: zenperfsql.py,v 3.14 2013/02/27 22:50:12 egor Exp $"""
 
-__version__ = "$Revision: 3.13 $"[11:-2]
+__version__ = "$Revision: 3.14 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -280,6 +279,13 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                 connection.close()
             if connection._connection is None:
                 del self._pool[poolKey]
+        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
+        # tasks cleanup.
+        # Workaround start
+        if ZVERSION < '3.0.0':
+            self._pool = None
+            self.state = TaskStates.STATE_IDLE
+        # Workaround end
 
     def doTask(self):
         """
@@ -289,6 +295,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @return: Deferred actions to run against a device configuration
         @rtype: Twisted deferred object
         """
+        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
+        # tasks cleanup.
+        if self._pool is None:
+            return defer.fail("Task cleaned")
         # See if we need to connect first before doing any collection
         d = defer.maybeDeferred(self._connect)
         d.addCallback(self._fetchPerf)
