@@ -20,11 +20,12 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.2.1'
+__version__ = '2.3.0'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
 import httplib, base64
+import threading
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -39,11 +40,12 @@ import re
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
 ANDPAT = re.compile("\s+AND\s+", re.I)
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
+ACTIONPAT = re.compile(r'>(.*)</wsa:Action>')
 
 XML_NS_SOAP_1_2 = "http://www.w3.org/2003/05/soap-envelope"
 XML_NS_ADDRESSING = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 XML_NS_ENUMERATION = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
-XML_NS_CIM_INTRINSIC = "http://schemas.openwsman.org/wbem/wscim/1/intrinsic"
+#XML_NS_CIM_INTRINSIC = "http://schemas.openwsman.org/wbem/wscim/1/intrinsic"
 XML_NS_WS_MAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
 XML_NS_CIM_CLASS = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2"
 XML_NS_WIN32_CIM_CLASS = "http://schemas.microsoft.com/wbem/wsman/1/wmi"
@@ -249,8 +251,8 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared
-threadsafety = 1
+# module and connection may be shared
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -500,7 +502,9 @@ class wsmanCursor(object):
 
     def _check_executed(self):
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
 
@@ -514,8 +518,7 @@ class wsmanCursor(object):
         self.description = None
         if self._enumCtx:
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
-                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx),
-                ENUM_ACTION_RELEASE)
+                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
         del self._rows[:]
         self._parser = None
         self._selectors.clear()
@@ -532,14 +535,15 @@ class wsmanCursor(object):
         guidelines.
         """
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         self.description = None
         self.rownumber = -1
         self._selectors.clear()
         if self._enumCtx:
             try: self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
-                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx),
-                ENUM_ACTION_RELEASE)
+                self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
             finally: self._enumCtx = None
 
         # for this method default value for params cannot be None,
@@ -551,10 +555,10 @@ class wsmanCursor(object):
 
         if args != ():
             operation = operation%args[0]
+        operation = operation.encode('unicode-escape')
 
         try:
-            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
-                                            ).replace('\\\\"','\\"')).groups('')
+            props, classname, where = WQLPAT.match(operation).groups('')
         except:
             raise ProgrammingError("Syntax error in the query statement.")
         if where:
@@ -578,7 +582,6 @@ class wsmanCursor(object):
                 try:
                     self._connection._wsman_request(INTR_REQ%(classname,
                         classname, self._url, classname, uuid.uuid4()),
-                        '/'.join((XML_NS_CIM_INTRINSIC, classname, 'GetClass')),
                         self._get_parser(True))
                 except Exception: pass
             if not self._namespace.startswith('http'):
@@ -594,13 +597,12 @@ class wsmanCursor(object):
             else: self._uri = '/'.join((self._namespace, classname))
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
                 self._url, self._uri, uuid.uuid4(),
-                ENUM_TMPL%(self._fltr and self._fltr%operation or '')),
-                ENUM_ACTION_ENUMERATE, self._get_parser())
+                ENUM_TMPL%(self._fltr and self._fltr%operation or '')),self._get_parser())
             if not self._enumCtx: return
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),
-                ENUM_ACTION_PULL, self._get_parser())
+                self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),self._get_parser())
             if self.description: self.rownumber = 0
+
         except InterfaceError, e:
             raise InterfaceError(e)
         except OperationalError, e:
@@ -633,8 +635,7 @@ class wsmanCursor(object):
         try:
             while not self._rows and self._enumCtx:
                 self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
-                    self._url, self._uri, uuid.uuid4(),PULL_TMPL%self._enumCtx),
-                    ENUM_ACTION_PULL, self._get_parser())
+                    self._url, self._uri, uuid.uuid4(),PULL_TMPL%self._enumCtx),self._get_parser())
             if not self._rows: return None
             self.rownumber += 1
             return self._rows.pop(0)
@@ -685,13 +686,13 @@ class wsmanCursor(object):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
     def setoutputsize(self, size=None, column=0):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
 
 ### connection object
@@ -703,33 +704,24 @@ class wsmanCnx:
 
     def __init__(self, *args, **kwargs):
         self._connection = None
-        self._timeout = None
-        conkwargs = {}
-        dialect = kwargs.get('dialect', '').upper()
-        scheme = str(kwargs.get('scheme', 'https')).lower()
-        conkwargs = {
+        self._timeout = float(kwargs.get('timeout', 60))
+        self._scheme = str(kwargs.get('scheme', 'https')).lower()
+        self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',
-            'port':int(kwargs.get('port', scheme == 'http' and 5985 or 5986))}
+            'port':int(kwargs.get('port',self._scheme=='http' and 5985 or 5986))}
         self._path = kwargs.get('path', '/wsman')
-        self._url = '%s://%s:%s%s'%(scheme, conkwargs['host'],
-                                    conkwargs['port'], self._path)
+        self._url = '%s://%s:%s%s'%(self._scheme, self._conkwargs['host'],
+                                    self._conkwargs['port'], self._path)
         self._namespace = kwargs.get('namespace') or 'root/cimv2'
         self._headers = {'Content-type': 'application/soap+xml; charset="utf-8"',
                         'User-Agent': 'pywsmandb'}
         if 'user' in kwargs:
             self._headers['Authorization'] = 'Basic %s'%base64.encodestring(
                 '%s:%s'%(kwargs['user'], kwargs.get('password','')))[:-1]
-        if scheme == 'https':
+        if self._scheme == 'https':
             if 'key_file' in kwargs and 'cert_file' in kwargs:
-                conkwargs['key_file'] = kwargs['key_file']
-                conkwargs['cert_file'] = kwargs['cert_file']
-            self._connection = httplib.HTTPSConnection(**conkwargs)
-        else:
-            self._connection = httplib.HTTPConnection(**conkwargs)
-        if hasattr(self._connection, 'timeout'):
-            self._connection.timeout = float(kwargs.get('timeout', 120))
-        else:
-            self._timeout = float(kwargs.get('timeout', 120))
+                self._conkwargs['key_file'] = kwargs['key_file']
+                self._conkwargs['cert_file'] = kwargs['cert_file']
         self._wsm_vendor = ''
         self._fltr={'WQL':WQL_FILTER_TMPL,
                     'CQL':CQL_FILTER_TMPL,
@@ -743,25 +735,33 @@ class wsmanCnx:
             self._wsm_vendor = 'Microsoft'
         elif 'Openwsman' in xml_resp: self._wsm_vendor = 'Openwsman'
         else: self._wsm_vendor = ''
+        self._lock = threading.Lock()
 
 
-    def _wsman_request(self, data, action = None, parser=None):
+    def _wsman_request(self, data, parser=None):
         """Send SOAP+XML data over HTTP to the specified url. Return the
         response in XML.  Uses Python's build-in httplib.
         """
 
-        headers = {}
-        headers.update(self._headers)
-        if action:
-            headers['SOAPAction'] = action
-
         oldtimeout = None
-        if self._timeout:
-            oldtimeout = socket.getdefaulttimeout()
-            if oldtimeout != self._timeout:
-                socket.setdefaulttimeout(self._timeout)
-        parsed = False
         try:
+            self._lock.acquire()
+            headers = {}
+            headers.update(self._headers)
+            action = ACTIONPAT.search(data)
+            if action:
+                headers['SOAPAction'] = action.group(1)
+
+            if self._scheme == 'https':
+                self._connection = httplib.HTTPSConnection(**self._conkwargs)
+            else:
+                self._connection = httplib.HTTPConnection(**self._conkwargs)
+            if hasattr(self._connection, 'timeout'):
+                self._connection.timeout = self._timeout
+            else:
+                oldtimeout = socket.getdefaulttimeout()
+                if oldtimeout != self._timeout:
+                    socket.setdefaulttimeout(self._timeout)
             try:
                 try:
                     if not getattr(self._connection, 'sock', None):
@@ -791,7 +791,7 @@ class wsmanCnx:
                     inpsrc = xmlreader.InputSource()
                     inpsrc.setByteStream(StringIO(xml_resp))
                     parser.parse(inpsrc)
-                parsed = True
+                return xml_resp
             except SAXParseException, e:
                 raise OperationalError("XML parsing error: %s" % e.getMessage())
             except httplib.BadStatusLine, arg:
@@ -801,16 +801,12 @@ class wsmanCnx:
             except socket.sslerror, arg:
                 raise InterfaceError("SSL error: %s" % (arg,))
         finally:
+            if self._connection is not None:
+                _connection, self._connection = self._connection, None
+                _connection.close()
             if oldtimeout and oldtimeout != socket.getdefaulttimeout():
                 socket.setdefaulttimeout(oldtimeout)
-            if not parsed:
-                if hasattr(parser, "_cont_handler"):
-                    if parser._cont_handler._cur._parser == parser:
-                        cursor = parser._cont_handler._cur
-                        cursor._parser = None
-                    else:
-                        parser = None
-        return xml_resp
+            self._lock.release()
 
     def __del__(self):
         self.close()
@@ -820,31 +816,34 @@ class wsmanCnx:
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
         if self._connection is not None:
-            if getattr(self._connection, 'sock', None):
-                self._connection.sock.shutdown(socket.SHUT_RDWR)
-                self._connection.sock.close()
-            self._connection.sock = None
-            if hasattr(self._connection, 'close'):
-                self._connection.close()
-            self._connection = None
+            _connection, self._connection = self._connection, None
+            _connection.close()
+        self._conkwargs.clear()
 
     def commit(self):
         """
         Commit transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
 
     def rollback(self):
         """
         Roll back transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
+        if self._connection is not None:
+            _connection, self._connection = self._connection, None
+            _connection.close()
 
     def cursor(self):
         """
         Return cursor object that can be used to make queries and fetch
         results from the database.
         """
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
         return wsmanCursor(self)
 
     def autocommit(self, status):

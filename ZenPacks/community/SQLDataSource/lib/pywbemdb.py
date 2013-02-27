@@ -20,11 +20,12 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.2.1'
+__version__ = '2.3.0'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
 import httplib, base64
+import threading
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -218,8 +219,8 @@ ROWID = DBAPITypeObject()
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared
-threadsafety = 1
+# module and connection may be shared
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -410,7 +411,6 @@ class wbemCursor(object):
         self._rows = []
         self._props = []
         self._keybindings = {}
-        self._parser = None
 
     @property
     def rowcount(self):
@@ -421,19 +421,11 @@ class wbemCursor(object):
         """
         return len(self._rows)
 
-    def _get_parser(self):
-        """
-        Returns parser object
-        """
-        if not self._parser:
-            parser = make_parser()
-            parser.setContentHandler(CIMHandler(self))
-            self._parser = parser
-        return self._parser
-
     def _check_executed(self):
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
 
@@ -444,9 +436,11 @@ class wbemCursor(object):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
+        del self._rows[:]
+        del self._props[:]
+        self._keybindings.clear()
         self.description = None
         self._connection = None
-        self._parser = None
 
     def execute(self, operation, *args):
         """
@@ -460,7 +454,9 @@ class wbemCursor(object):
         guidelines.
         """
         if not self._connection:
-            raise InterfaceError("Connection closed.")
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._conkwargs:
+            raise ProgrammingError("Connection closed.")
         self.description = None
         self.rownumber = -1
         del self._rows[:]
@@ -475,10 +471,10 @@ class wbemCursor(object):
 
         if args != ():
             operation = operation%args[0]
+        operation = operation.encode('unicode-escape')
 
         try:
-            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
-                                        ).replace('\\\\"', '\\"')).groups('')
+            props, classname, where = WQLPAT.match(operation).groups('')
         except:
             raise ProgrammingError("Syntax error in the query statement.")
         if where:
@@ -509,7 +505,13 @@ class wbemCursor(object):
                     '"/>\n<NAMESPACE NAME="'.join(self._namespace.split('/')),
                     ''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
                     pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')))
-            self._connection._wbem_request(xml_req, self._get_parser())
+            xml_resp = self._connection._wbem_request(xml_req)
+            xml_handler = CIMHandler(self)
+            parser = make_parser()
+            parser.setContentHandler(xml_handler)
+            inpsrc = xmlreader.InputSource()
+            inpsrc.setByteStream(StringIO(xml_resp))
+            parser.parse(inpsrc)
             if self.description: self.rownumber = 0
 
         except InterfaceError, e:
@@ -578,20 +580,19 @@ class wbemCursor(object):
         Return self to make cursors compatible with
         Python iteration protocol.
         """
-        self._check_executed()
         return self
 
     def setinputsizes(self, sizes=None):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
     def setoutputsize(self, size=None, column=0):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
 ### connection object
 
@@ -601,13 +602,12 @@ class pywbemCnx:
     """
     def __init__(self, *args, **kwargs):
         self._connection = None
-        self._timeout = None
-        conkwargs = {}
+        self._timeout = float(kwargs.get('timeout', 60))
         self._dialect = kwargs.get('dialect', '').upper()
-        scheme = str(kwargs.get('scheme', 'https')).lower()
-        conkwargs = {
+        self._scheme = str(kwargs.get('scheme', 'https')).lower()
+        self._conkwargs = {
             'host':kwargs.get('host') or 'localhost',
-            'port':int(kwargs.get('port', scheme == 'http' and 5988 or 5989))}
+            'port':int(kwargs.get('port',self._scheme=='http' and 5988 or 5989))}
         self._namespace = kwargs.get('namespace') or 'root/cimv2'
         self._headers = {'Content-type': 'application/xml; charset="utf-8"',
             'CIMOperation': 'MethodCall',
@@ -616,30 +616,30 @@ class pywbemCnx:
         if 'user' in kwargs:
             self._headers['Authorization'] = 'Basic %s'%base64.encodestring(
                 '%s:%s'%(kwargs['user'], kwargs.get('password','')))[:-1]
-        if scheme == 'https':
+        if self._scheme == 'https':
             if 'key_file' in kwargs and 'cert_file' in kwargs:
-                conkwargs['key_file'] = kwargs['key_file']
-                conkwargs['cert_file'] = kwargs['cert_file']
-            self._connection = httplib.HTTPSConnection(**conkwargs)
-        else:
-            self._connection = httplib.HTTPConnection(**conkwargs)
-        if hasattr(self._connection, 'timeout'):
-            self._connection.timeout = float(kwargs.get('timeout', 120))
-        else:
-            self._timeout = float(kwargs.get('timeout', 120))
+                self._conkwargs['key_file'] = kwargs['key_file']
+                self._conkwargs['cert_file'] = kwargs['cert_file']
+        self._lock = threading.Lock()
 
-    def _wbem_request(self, data, parser=None):
+    def _wbem_request(self, data):
         """Send XML data over HTTP to the specified url. Return the
         response in XML.  Uses Python's build-in httplib.
         """
 
         oldtimeout = None
-        if self._timeout:
-            oldtimeout = socket.getdefaulttimeout()
-            if oldtimeout != self._timeout:
-                socket.setdefaulttimeout(self._timeout)
-        parsed = False
         try:
+            self._lock.acquire()
+            if self._scheme == 'https':
+                self._connection = httplib.HTTPSConnection(**self._conkwargs)
+            else:
+                self._connection = httplib.HTTPConnection(**self._conkwargs)
+            if hasattr(self._connection, 'timeout'):
+                self._connection.timeout = self._timeout
+            else:
+                oldtimeout = socket.getdefaulttimeout()
+                if oldtimeout != self._timeout:
+                    socket.setdefaulttimeout(self._timeout)
             try:
                 try:
                     if not getattr(self._connection, 'sock', None):
@@ -662,11 +662,7 @@ class pywbemCnx:
                     raise InterfaceError('HTTP error: %s'%str((response.status,
                                                             response.reason)))
 
-                if parser:
-                    inpsrc = xmlreader.InputSource()
-                    inpsrc.setByteStream(StringIO(xml_resp))
-                    parser.parse(inpsrc)
-                parsed = True
+                return xml_resp
             except SAXParseException, e:
                 raise OperationalError("XML parsing error: %s" % e.getMessage())
             except httplib.BadStatusLine, arg:
@@ -676,16 +672,12 @@ class pywbemCnx:
             except socket.sslerror, arg:
                 raise InterfaceError("SSL error: %s" % (arg,))
         finally:
+            if self._connection is not None:
+                _connection, self._connection = self._connection, None
+                _connection.close()
             if oldtimeout and oldtimeout != socket.getdefaulttimeout():
                 socket.setdefaulttimeout(oldtimeout)
-            if not parsed:
-                if hasattr(parser, "_cont_handler"):
-                    if parser._cont_handler._cur._parser == parser:
-                        cursor = parser._cont_handler._cur
-                        cursor._parser = None
-                    else:
-                        parser = None
-        return xml_resp
+            self._lock.release()
 
     def __del__(self):
         self.close()
@@ -695,31 +687,34 @@ class pywbemCnx:
         Close connection to the WBEM CIMOM. Implicitly rolls back
         """
         if self._connection is not None:
-            if getattr(self._connection, 'sock', None):
-                self._connection.sock.shutdown(socket.SHUT_RDWR)
-                self._connection.sock.close()
-            self._connection.sock = None
-            if hasattr(self._connection, 'close'):
-                self._connection.close()
-            self._connection = None
+            _connection, self._connection = self._connection, None
+            _connection.close()
+        self._conkwargs.clear()
 
     def commit(self):
         """
         Commit transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
 
     def rollback(self):
         """
         Roll back transaction which is currently in progress.
         """
-        return
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
+        if self._connection is not None:
+            _connection, self._connection = self._connection, None
+            _connection.close()
 
     def cursor(self):
         """
         Return cursor object that can be used to make queries and fetch
         results from the database.
         """
+        if not self._conkwargs:
+            raise ProgrammingError("Connection closed.")
         return wbemCursor(self)
 
     def autocommit(self, status):

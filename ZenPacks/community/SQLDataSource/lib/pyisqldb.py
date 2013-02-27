@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.0.8'
+__version__ = '1.0.9'
 
 from string import upper, strip
 import threading
@@ -350,13 +350,13 @@ class isqlCursor(object):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
     def setoutputsize(self, size=None, column=0):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
 
 ### connection object

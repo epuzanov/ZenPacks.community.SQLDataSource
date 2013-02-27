@@ -20,10 +20,14 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 from datetime import datetime, timedelta
-from threading import Lock
+import threading
+LOCK = threading.Lock()
+def Lock():
+    global LOCK
+    return LOCK
 import re
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\s+(?P<kbs>.+))?", re.I)
@@ -38,9 +42,10 @@ try:
 except:
     raise StandardError("Can't import pysamba modules. Please, install pysamba first.")
 from pysamba.wbem.wbem import *
-from pysamba.talloc import *
-from pysamba.rpc.credentials import CRED_SPECIFIED
 from pysamba.version import VERSION as PSVERSION
+
+import logging
+log = logging.getLogger("zen.pywmidb")
 
 from distutils.version import StrictVersion
 if not getattr(WbemQualifier, "_fields_", None):
@@ -71,6 +76,18 @@ if not getattr(WbemQualifier, "_fields_", None):
         ('cimtype', uint32_t),
         ('value', CIMVAR),
         ]
+
+if not library.lp_loaded():
+    library.lp_load()
+    library.dcerpc_init()
+    library.dcerpc_table_init()
+    library.dcom_proxy_IUnknown_init()
+    library.dcom_proxy_IWbemLevel1Login_init()
+    library.dcom_proxy_IWbemServices_init()
+    library.dcom_proxy_IEnumWbemClassObject_init()
+    library.dcom_proxy_IRemUnknown_init()
+    library.dcom_proxy_IWbemFetchSmartEnum_init()
+    library.dcom_proxy_IWbemWCOSmartEnum_init()
 
 class DBAPITypeObject:
     def __init__(self,*values):
@@ -144,13 +161,58 @@ NUMBER = DBAPITypeObject(CIM_SINT8, CIM_UINT8, CIM_SINT16, CIM_UINT16,
 DATETIME = DBAPITypeObject(CIM_DATETIME)
 ROWID = DBAPITypeObject()
 
+def _datetime(v):
+    """
+    Convert string to datetime.
+    """
+    r = DTPAT.match(str(v.v_string))
+    if not r: return v.v_string
+    tt = map(int, r.groups(0))
+    if abs(tt[7]) > 30: minutes = tt[7]
+    elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
+    else: minutes = 60 * tt[7] + tt[8]
+    return datetime(*tt[:7]) - timedelta(minutes=minutes)
+
+def _convertArray(arr):
+    """
+    Convert array value from CIMTYPE to python types.
+    """
+    if not arr: return None
+    return [arr.contents.item[i] for i in range(arr.contents.count)]
+
+TYPEFUNCT = {CIM_SINT8:lambda v:v.v_sint8, CIM_UINT8:lambda v:v.v_uint8,
+    CIM_SINT16:lambda v:v.v_sint16, CIM_UINT16:lambda v:v.v_uint16,
+    CIM_SINT32:lambda v:v.v_sint32, CIM_UINT32:lambda v:v.v_uint32,
+    CIM_SINT64:lambda v:v.v_sint64, CIM_UINT64:lambda v:v.v_uint64,
+    CIM_REAL32:lambda v:float(v.v_uint32),CIM_REAL64:lambda v:float(v.v_uint64),
+    CIM_OBJECT:lambda v:v.v_string, CIM_STRING:lambda v:v.v_string,
+    CIM_CHAR16:lambda v:v.v_string.decode('utf16'), CIM_DATETIME: _datetime,
+    CIM_BOOLEAN:lambda v: str(v).lower() == 'true',
+    CIM_REFERENCE:lambda v:v.v_string.startswith(r'\\') and v.v_string.split(
+        ':', 1)[-1] or v.v_string,
+    CIM_ARR_SINT8:lambda v:_convertArray(v.a_sint8),
+    CIM_ARR_UINT8:lambda v:_convertArray(v.a_uint8),
+    CIM_ARR_SINT16:lambda v:_convertArray(v.a_sint16),
+    CIM_ARR_UINT16:lambda v:_convertArray(v.a_uint16),
+    CIM_ARR_SINT32:lambda v:_convertArray(v.a_sint32),
+    CIM_ARR_UINT32:lambda v:_convertArray(v.a_uint32),
+    CIM_ARR_SINT64:lambda v:_convertArray(v.a_sint64),
+    CIM_ARR_UINT64:lambda v:_convertArray(v.a_uint64),
+    CIM_ARR_REAL32:lambda v:_convertArray(v.a_real32),
+    CIM_ARR_REAL64:lambda v:_convertArray(v.a_real64),
+    CIM_ARR_BOOLEAN:lambda v:_convertArray(v.a_boolean),
+    CIM_ARR_STRING:lambda v:_convertArray(v.a_string),
+    CIM_ARR_DATETIME:lambda v:_convertArray(v.a_datetime),
+    CIM_ARR_REFERENCE:lambda v:_convertArray(v.a_reference),
+    }
+
 ### module constants
 
 # compliant with DB SIG 2.0
 apilevel = '2.0'
 
-# module may be shared, but not connections
-threadsafety = 3
+# module and connection may be shared
+threadsafety = 2
 
 # this module use extended python format codes
 paramstyle = 'qmark'
@@ -187,7 +249,6 @@ class ProgrammingError(DatabaseError):
 class NotSupportedError(DatabaseError):
     pass
 
-
 ### cursor object
 
 class wmiCursor(object):
@@ -203,95 +264,28 @@ class wmiCursor(object):
         self._connection = connection
         self.description = None
         self.rownumber = -1
-        self.arraysize = connection._wmibatchSize
-        self._kbs = {}
-        self._pEnum = None
-        self._firstrow = None
-
-    connection = property(lambda self: self._getConnection())
-    def _getConnection(self):
-        warn("DB-API extension cursor.connection used", stacklevel=3)
-        return self._connection
+        self.arraysize = 1
+        self._rows = []
 
     def _check_executed(self):
-        if not self._connection._ctx:
-            raise InterfaceError("Connection closed.")
+        if not self._connection:
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._creds:
+            raise ProgrammingError("Connection closed.")
         if not self.description:
             raise OperationalError("No data available. execute() first.")
 
     def __del__(self):
-        self.close()
-
-    def _release(self):
-        """
-        Release Enumerator and reset objects buffer.
-        """
-        self._firstrow = None
-        self._kbs.clear()
-        self.description = None
-        if self._pEnum: self._connection._release(self)
-        self._pEnum = None
+        if self._connection:
+            self.close()
 
     def close(self):
         """
         Closes the cursor. The cursor is unusable from this point.
         """
-        self._release()
-
-    def _convertArray(self, arr):
-        """
-        Convert array value from CIMTYPE to python types.
-        """
-        if not arr: return None
-        return [arr.contents.item[i] for i in range(arr.contents.count)]
-
-    def _convert(self, v, typeval):
-        """
-        Convert value from CIMTYPE to python types.
-        """
-        if typeval == CIM_SINT8: return v.v_sint8
-        if typeval == CIM_UINT8: return v.v_uint8
-        if typeval == CIM_SINT16: return v.v_sint16
-        if typeval == CIM_UINT16: return v.v_uint16
-        if typeval == CIM_SINT32: return v.v_sint32
-        if typeval == CIM_UINT32: return v.v_uint32
-        if typeval == CIM_SINT64: return v.v_sint64
-        if typeval == CIM_UINT64: return v.v_sint64
-        if typeval == CIM_REAL32: return float(v.v_uint32)
-        if typeval == CIM_REAL64: return float(v.v_uint64)
-        if typeval == CIM_BOOLEAN: return bool(v.v_boolean)
-        if typeval == CIM_REFERENCE:
-            if not v.v_string.startswith(r'\\'): return v.v_string
-            return v.v_string.split(':', 1)[-1]
-        if typeval == CIM_STRING: return v.v_string
-        if typeval == CIM_CHAR16: return v.v_string.decode('utf16')
-        if typeval == CIM_OBJECT: return v.v_string
-        if typeval == CIM_DATETIME:
-            r = DTPAT.match(str(v.v_string))
-            if not r: return v.v_string
-            tt = map(int, r.groups(0))
-            if abs(tt[7]) > 30: minutes = tt[7]
-            elif tt[7] < 0: minutes = 60 * tt[7] - tt[8]
-            else: minutes = 60 * tt[7] + tt[8]
-            return datetime(*tt[:7]) - timedelta(minutes=minutes)
-        if typeval == CIM_ARR_SINT8: return self._convertArray(v.a_sint8)
-        if typeval == CIM_ARR_UINT8: return self._convertArray(v.a_uint8)
-        if typeval == CIM_ARR_SINT16: return self._convertArray(v.a_sint16)
-        if typeval == CIM_ARR_UINT16: return self._convertArray(v.a_uint16)
-        if typeval == CIM_ARR_SINT32: return self._convertArray(v.a_sint32)
-        if typeval == CIM_ARR_UINT32: return self._convertArray(v.a_uint32)
-        if typeval == CIM_ARR_SINT64: return self._convertArray(v.a_sint64)
-        if typeval == CIM_ARR_UINT64: return self._convertArray(v.a_uint64)
-        if typeval == CIM_ARR_REAL32: return self._convertArray(v.a_real32)
-        if typeval == CIM_ARR_REAL64: return self._convertArray(v.a_real64)
-        if typeval == CIM_ARR_BOOLEAN: return self._convertArray(v.a_boolean)
-        if typeval == CIM_ARR_STRING: return self._convertArray(v.a_string)
-        if typeval == CIM_ARR_DATETIME:
-            return self._convertArray(v.contents.a_datetime)
-        if typeval == CIM_ARR_REFERENCE:
-            return self._convertArray(v.contents.a_reference)
-        return "Unsupported"
-
+        del self._rows[:]
+        self.description = None
+        self._connection = None
 
     def execute(self, operation, *args):
         """
@@ -304,10 +298,13 @@ class wmiCursor(object):
         Please consult online documentation for more examples and
         guidelines.
         """
-        if not self._connection._ctx:
-            raise InterfaceError("Connection closed.")
-        self._release()
+        if not self._connection:
+            raise ProgrammingError("Cursor closed.")
+        if not self._connection._creds:
+            raise ProgrammingError("Connection closed.")
+        del self._rows[:]
         self.rownumber = -1
+        self.description = None
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -318,89 +315,19 @@ class wmiCursor(object):
 
         if args != ():
             operation = operation%args[0]
+        operation = operation.encode('unicode-escape')
 
-        ocount = 0
-        self._pEnum = POINTER(IEnumWbemClassObject)()
-        objs = None
-        objs = (POINTER(WbemClassObject) * 1)()
         try:
-            props, classname, where = WQLPAT.match(operation.replace('\\','\\\\'
-                                            ).replace('\\\\"','\\"')).groups('')
-            if where:
-                try:
-                    self._kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(
-                                                                    ',',where)))
-                    if [v for v in self._kbs.values() if type(v) is list]:
-                        if props == '*': kbkeys = ''
-                        else: kbkeys = ',%s'%','.join(self._kbs.keys())
-                        operation='SELECT %s%s FROM %s'%(props,kbkeys,classname)
-                    else: self._kbs.clear()
-                except: self._kbs.clear()
-            props = props.upper().replace(' ','').split(',')
-            if '*' in props: props.remove('*')
-            ocount = self._connection._execQuery(operation, self, objs)
-            if ocount == 0:
-                self._pEnum = None
-                objs = None
-                return
-            klass = objs[0].contents.obj_class.contents
-            inst = objs[0].contents.instance.contents
-            pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
-                    '__NAMESPACE':getattr(objs[0].contents,
-                                        '__NAMESPACE', '').replace('\\', '/')}
-            iPath = []
-            dDict = {}
-            maxlen = {}
-            kbKeys = []
-            for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                prop = klass.properties[j]
-                if not prop.name: continue
-                uName = prop.name.upper()
-                pType = prop.desc.contents.cimtype & CIM_TYPEMASK
-                pVal = self._convert(inst.data[j], pType)
-                pdict[uName] = pVal
-                if self._kbs.get(prop.name, pVal) != pVal:
-                    pdict.clear()
-                    break
-                for i in range(prop.desc.contents.qualifiers.count):
-                    q = prop.desc.contents.qualifiers.item[i].contents
-                    if q.name in ['key']:
-                        if uName not in kbKeys:
-                            kbKeys.append(uName)
-                            if pType == NUMBER:
-                                iPath.append('%s=%s'%(prop.name, pVal))
-                            else:
-                                iPath.append('%s="%s"'%(prop.name, pVal))
-                    if q.name == 'MaxLen':
-                        maxlen[uName] = self._convert(q.value, q.cimtype)
-                dDict[uName] = (prop.name,
-                                prop.desc.contents.cimtype & CIM_TYPEMASK,
-                                maxlen.get(uName, None),maxlen.get(uName, None),
-                                None, None, None)
-            talloc_free(objs[0])
-            objs = None
-            if not props:
-                props = dDict.keys()
-                props.extend(['__PATH', '__CLASS', '__NAMESPACE'])
-            self.description = tuple([dDict.get(p,(p, 8, None, None, None,
-                                                None, None)) for p in props])
-            if '__PATH' in props:
-                pdict['__PATH'] = '%s.%s'%(pdict['__CLASS'], ','.join(iPath))
-            self._firstrow = tuple([pdict.get(p, None) for p in props])
-            pdict.clear()
-            if self.description: self.rownumber = 0
+            self.description,self._rows = self._connection._execQuery(operation)
+            if self.description:
+                self.rownumber = 0
 
-        except WError, e:
-            self._pEnum = None
-            if ocount != 0: talloc_free(objs[0])
-            self._release()
+        except InterfaceError, e:
+            raise InterfaceError(e)
+        except OperationalError, e:
             raise OperationalError(e)
         except Exception, e:
-            self._pEnum = None
-            if ocount != 0: talloc_free(objs[0])
-            self._release()
             raise OperationalError(e)
-
 
     def executemany(self, operation, param_seq):
         """
@@ -423,72 +350,31 @@ class wmiCursor(object):
     def fetchone(self):
         """Fetches a single row from the cursor. None indicates that
         no more rows are available."""
-        return (self.fetchmany(size=1) or (None,))[0]
+        self._check_executed()
+        if not self._rows: return None
+        self.rownumber += 1
+        return self._rows.pop(0)
 
-    def fetchmany(self, size=0):
+    def fetchmany(self, size=None):
         """Fetch up to size rows from the cursor. Result set may be smaller
         than size. If size is not defined, cursor.arraysize is used."""
         self._check_executed()
-        lastrow = size
-        if size < 1: size = self.arraysize
-        if lastrow > -1: lastrow = self.rownumber + size
+        if size: size += self.rownumber
+        else: size = self.arraysize + self.rownumber
         results = []
-        if self._firstrow:
-            results.append(self._firstrow)
-            self._firstrow = None
+        while self._rows and self.rownumber < size:
             self.rownumber += 1
-            if self.rownumber == lastrow:
-                return results
-        props = [p[0].upper() for p in self.description]
-        objs = None
-        objs = (POINTER(WbemClassObject) * size)()
-        try:
-            while self._pEnum and self.rownumber != lastrow:
-                for i in range(self._connection._smartNext(size, self, objs)):
-                    iPath = []
-                    klass = objs[i].contents.obj_class.contents
-                    inst = objs[i].contents.instance.contents
-                    pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
-                        '__NAMESPACE':getattr(objs[i].contents,
-                                            '__NAMESPACE','').replace('\\','/')}
-                    for j in range(getattr(klass, '__PROPERTY_COUNT')):
-                        prop = klass.properties[j]
-                        if not prop.name: continue
-                        uName = prop.name.upper()
-                        pType = prop.desc.contents.cimtype & CIM_TYPEMASK
-                        pVal = self._convert(inst.data[j], pType)
-                        pdict[uName] = pVal
-                        if self._kbs.get(prop.name, pVal) != pVal:
-                            pdict.clear()
-                            break
-                        if '__PATH' not in props: continue
-                        for k in range(prop.desc.contents.qualifiers.count):
-                            q = prop.desc.contents.qualifiers.item[k].contents
-                            if q.name not in ['key']: continue
-                            if pType == NUMBER:
-                                iPath.append('%s=%s'%(prop.name, pVal))
-                            else:
-                                iPath.append('%s="%s"'%(prop.name, pVal))
-                    talloc_free(objs[i]) 
-                    if not pdict: continue
-                    if '__PATH' in props:
-                        pdict['__PATH'] = '%s.%s'%( pdict['__CLASS'],
-                                                        ','.join(iPath))
-                    results.append(tuple([pdict.get(p, None) for p in props]))
-                    pdict.clear()
-                    self.rownumber += 1
-            return results
-
-        except WError, e:
-            self._release()
-            raise OperationalError(e)
-        except Exception, e:
-            self._release()
-            raise OperationalError(e)
+            results.append(self._rows.pop(0))
+        return results
 
     def fetchall(self):
         """Fetchs all available rows from the cursor."""
-        return self.fetchmany(size=-1)
+        self._check_executed()
+        results = []
+        while self._rows:
+            self.rownumber += 1
+            results.append(self._rows.pop(0))
+        return results
 
     def next(self):
         """Fetches a single row from the cursor. None indicates that
@@ -509,13 +395,14 @@ class wmiCursor(object):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
 
     def setoutputsize(self, size=None, column=0):
         """
         This method does nothing, as permitted by DB-API specification.
         """
-        self._check_executed()
+        return
+
 
 ### connection object
 
@@ -525,57 +412,31 @@ class pysambaCnx:
     """
 
     def __init__(self, *args, **kwargs):
-        self._timeout = float(kwargs.get('timeout', 60))
+        self._timeout = float(kwargs.get('timeout', 30))
         if self._timeout > 0: self._timeout = int(self._timeout * 1000)
         self._host = kwargs.get('host', 'localhost')
-        self._ctx = POINTER(com_context)()
-        self._pWS = POINTER(IWbemServices)()
-        self._wmibatchSize = int(kwargs.get('wmibatchSize', 1))
-        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._ctx = None
+        self._pWS = None
+        self._wmibatchSize = int(kwargs.get('wmibatchSize', 5))
         self._locale = kwargs.get('locale', None)
-        creds = '%s%%%s'%(kwargs.get('user', ''), kwargs.get('password', ''))
-        ntlmv2 = kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no'
+        self._namespace = kwargs.get('namespace', 'root/cimv2')
+        self._creds = '%s%%%s'%(kwargs.get('user',''),kwargs.get('password',''))
+        library.lp_do_parameter(-1, "client ntlmv2 auth",
+            kwargs.get('ntlmv2', 'no').lower() == 'yes' and 'yes' or 'no')
         self._lock = Lock()
-        try:
-            self._lock.acquire()
-            try:
-                if not library.lp_loaded():
-                    library.lp_load()
-                    library.dcerpc_init()
-                    library.dcerpc_table_init()
-                    library.dcom_proxy_IUnknown_init()
-                    library.dcom_proxy_IWbemLevel1Login_init()
-                    library.dcom_proxy_IWbemServices_init()
-                    library.dcom_proxy_IEnumWbemClassObject_init()
-                    library.dcom_proxy_IRemUnknown_init()
-                    library.dcom_proxy_IWbemFetchSmartEnum_init()
-                    library.dcom_proxy_IWbemWCOSmartEnum_init()
-
-                library.com_init_ctx(byref(self._ctx), None)
-
-                cred = library.cli_credentials_init(self._ctx)
-                library.cli_credentials_set_conf(cred)
-                library.cli_credentials_parse_string(cred, creds,CRED_SPECIFIED)
-                library.dcom_client_init(self._ctx, cred)
-                library.lp_do_parameter(-1, "client ntlmv2 auth", ntlmv2)
-
-            except WError, e:
-                self.close()
-                raise InterfaceError(e)
-
-            except Exception, e:
-                self.close()
-                raise InterfaceError(e)
-        finally: self._lock.release()
         self._connect()
 
     def _connect(self):
-        """
-        Connect to server
-        """
         try:
             self._lock.acquire()
+            self._ctx = POINTER(com_context)()
+            self._pWS = POINTER(IWbemServices)()
             try:
+                library.com_init_ctx(byref(self._ctx), None)
+                cred = library.cli_credentials_init(self._ctx)
+                library.cli_credentials_set_conf(cred)
+                library.cli_credentials_parse_string(cred, self._creds, 5)
+                library.dcom_client_init(self._ctx, cred)
                 flags = uint32_t()
                 flags.value = 0
                 result = library.WBEM_ConnectServer(
@@ -587,28 +448,45 @@ class pysambaCnx:
                             self._locale,                          # locale
                             flags.value,                           # flags
                             None,                                  # authority 
-                            POINTER(IWbemContext)(),               # wbem_ctx 
+                            None,                                  # wbem_ctx
                             byref(self._pWS))                      # services 
                 WERR_CHECK(result, self._host, "Connect")
-
-            except WError, e:
-                self.close()
-                raise InterfaceError(e)
-
             except Exception, e:
                 self.close()
                 raise InterfaceError(e)
         finally: self._lock.release()
 
-    def _execQuery(self, operation, cursor, objs):
+    def _execQuery(self, operation):
         """
         Executes WQL query
         """
-        ocount = uint32_t()
+        pEnum = None
+        if self._creds and not self._ctx:
+            self._connect()
         try:
             self._lock.acquire()
-            try:
-                result = library.IWbemServices_ExecQuery(
+            dDict = {}
+            kbs = {}
+            rows = []
+            result = None
+            pEnum = POINTER(IEnumWbemClassObject)()
+            ocount = uint32_t()
+            ocount.value = self._wmibatchSize
+            props, classname, where = WQLPAT.match(operation).groups('')
+            if where:
+                try:
+                    kbs.update(eval('(lambda **kws:kws)(%s)'%ANDPAT.sub(
+                                                                    ',',where)))
+                    if [v for v in kbs.values() if type(v) is list]:
+                        if props == '*': kbkeys = ''
+                        else: kbkeys = ',%s'%','.join(kbs.keys())
+                        operation='SELECT %s%s FROM %s'%(props,kbkeys,classname)
+                    else: kbs.clear()
+                except: kbs.clear()
+            props = props.upper().replace(' ','').split(',')
+            if '*' in props: props.remove('*')
+            log.debug('send query: %s', operation)
+            result = library.IWbemServices_ExecQuery(
                             self._pWS,
                             self._ctx,
                             "WQL",
@@ -617,109 +495,114 @@ class pysambaCnx:
                             WBEM_FLAG_RETURN_IMMEDIATELY | \
                             WBEM_FLAG_ENSURE_LOCATABLE,
                             None,
-                            byref(cursor._pEnum))
-                WERR_CHECK(result, self._host, "ExecQuery")
-#                result = library.IEnumWbemClassObject_Reset(cursor._pEnum,
-#                                                                    self._ctx)
-#                WERR_CHECK(result, self._host, "Reset result of WMI query.")
+                            byref(pEnum))
+            WERR_CHECK(result, self._host, "ExecQuery")
+            log.debug('received enumerator: %s', pEnum)
+            while ocount.value == self._wmibatchSize:
+                ocount = uint32_t()
+                objs = (POINTER(WbemClassObject) * self._wmibatchSize)()
+                log.debug('send SmartNext for enumerator: %s', pEnum)
                 result = library.IEnumWbemClassObject_SmartNext(
-                            cursor._pEnum,
+                            pEnum,
                             self._ctx,
                             self._timeout,
-                            1,
+                            self._wmibatchSize,
                             objs,
                             byref(ocount))
                 WERR_CHECK(result, self._host, "Retrieve result data.")
-                return ocount.value
-
-            except WError, e:
-                cursor._pEnum = None
-                if ocount.value != 0: talloc_free(objs[0])
-                raise InterfaceError(e)
-            except Exception, e:
-                cursor._pEnum = None
-                if ocount.value != 0: talloc_free(objs[0])
-                raise OperationalError(e)
-        finally: self._lock.release()
-
-    def _smartNext(self, size, cursor, objs):
-        """
-        Returned next object from Enumarator
-        """
-        ocount = uint32_t()
-        try:
-            self._lock.acquire()
-            try:
-                result = library.IEnumWbemClassObject_SmartNext(
-                            cursor._pEnum,
-                            self._ctx,
-                            self._timeout,
-                            size,
-                            objs,
-                            byref(ocount))
-                WERR_CHECK(result, self._host, "Retrieve result data.")
-                if ocount.value > 0:
-                    return ocount.value
-                objs = None
-                if cursor._pEnum:
+                log.debug('retrive result from enumerator: %s', pEnum)
+                for i in range(ocount.value):
                     try:
-                        result=library.IUnknown_Release(cursor._pEnum,self._ctx)
-                        WERR_CHECK(result, self._host, "Release enumerator.")
-                    except: pass
-                cursor._pEnum = None
-                return 0
-
-            except WError, e:
-                cursor._pEnum = None
-                objs = None
-                raise InterfaceError(e)
-            except Exception, e:
-                cursor._pEnum = None
-                objs = None
-                raise OperationalError(e)
-        finally: self._lock.release()
-
-    def _release(self, cursor):
-        """
-        Release Enumerator
-        """
-        try:
-            self._lock.acquire()
-            try:
-                result = library.IUnknown_Release(cursor._pEnum, self._ctx)
-                WERR_CHECK(result, self._host, "Release enumerator.")
-            except: pass
-        finally: self._lock.release()
+                        klass = objs[i].contents.obj_class.contents
+                        inst = objs[i].contents.instance.contents
+                        pdict = {'__CLASS':getattr(klass, '__CLASS', ''),
+                                '__NAMESPACE':getattr(objs[i].contents,
+                                '__NAMESPACE','').replace('\\','/'),
+                                '__PATH':'%s.'%getattr(klass, '__CLASS', '')}
+                        for j in range(getattr(klass, '__PROPERTY_COUNT')):
+                            prop = klass.properties[j]
+                            if not prop.name: continue
+                            uName = prop.name.upper()
+                            pType = prop.desc.contents.cimtype & CIM_TYPEMASK
+                            pVal = TYPEFUNCT.get(pType,
+                                lambda v:v.v_string)(inst.data[j])
+                            pdict[uName] = pVal
+                            if kbs.get(prop.name, pVal) != pVal:
+                                pdict.clear()
+                                break
+                            if props and '__PATH' not in props and uName in dDict:
+                                continue
+                            maxlen = None
+                            for k in range(prop.desc.contents.qualifiers.count):
+                                q=prop.desc.contents.qualifiers.item[k].contents
+                                if q.name == 'MaxLen' and not rows:
+                                    maxlen = TYPEFUNCT.get(q.cimtype,
+                                        lambda v:v.v_string)(q.value)
+                                if q.name in ['key']:
+                                    if pType != NUMBER:
+                                        pVal = '"%s"'%pVal
+                                    pdict['__PATH'] += '%s=%s,'%(prop.name,pVal)
+                            if uName not in dDict:
+                                dDict[uName] = (prop.name, pType,
+                                    maxlen, maxlen, None, None, None)
+                        if pdict:
+                            pdict['__PATH'] = pdict['__PATH'][:-1]
+                            rows.append(pdict)
+                    finally:
+                        library.talloc_free(objs[i])
+            if not props and dDict:
+                props = dDict.keys() + ['__PATH', '__CLASS', '__NAMESPACE']
+            description = tuple([dDict.get(p,(p, 8, None, None, None,
+                                    None, None)) for p in props]) or None
+            result = [tuple([pd.get(p, None) for p in props]) for pd in rows]
+            return description, result
+        finally:
+            if pEnum:
+                result = library.IUnknown_Release(pEnum, self._ctx)
+                pEnum = None
+            self._lock.release()
 
     def __del__(self):
-        self.close()
+        if self._ctx:
+            self.close()
 
     def close(self):
         """
         Close connection to the WMI CIMOM. Implicitly rolls back
         """
+        self._creds = None
         self._pWS = None
         if self._ctx:
-            talloc_free(self._ctx)
-        self._ctx = None
+            log.debug('clean context: %s', self._ctx)
+            _ctx, self._ctx = self._ctx, None
+            library.talloc_free(_ctx)
+        log.debug('connection: %s - closed', self)
 
     def commit(self):
         """
         Commit transaction which is currently in progress.
         """
-        return
+        if not self._ctx:
+            raise ProgrammingError("Connection closed.")
 
     def rollback(self):
         """
         Roll back transaction which is currently in progress.
         """
-        return
+        log.debug('rollback connection: %s', self)
+        self._pWS = None
+        if self._ctx:
+            log.debug('clean context: %s', self._ctx)
+            _ctx, self._ctx = self._ctx, None
+            library.talloc_free(_ctx)
 
     def cursor(self):
         """
         Return cursor object that can be used to make queries and fetch
         results from the database.
         """
+        if not self._ctx:
+            raise ProgrammingError("Connection closed.")
         return wmiCursor(self)
 
     def autocommit(self, status):

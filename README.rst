@@ -34,7 +34,7 @@ user.
 
     ::
 
-        zenpack --install ZenPacks.community.SQLDataSource-2.4.egg
+        zenpack --install ZenPacks.community.SQLDataSource-2.5.0.egg
         zenoss restart
 
 Developer Installation (link mode)
