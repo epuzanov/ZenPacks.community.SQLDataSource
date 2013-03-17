@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.15 2013/02/27 22:43:17 egor Exp $"""
+$Id: SQLClient.py,v 3.16 2013/03/17 21:07:47 egor Exp $"""
 
-__version__ = "$Revision: 3.15 $"[11:-2]
+__version__ = "$Revision: 3.16 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -30,6 +30,7 @@ from twisted.spread import pb
 import threading
 import sys
 import re
+import time
 
 try:
     from Products.ZenCollector.pools import getPool
@@ -93,16 +94,30 @@ class adbapiClient(object):
         self._connection = None
         self._running = set()
         self._dbapi = None
+        self.ready = None
+        self._deflock = defer.DeferredLock()
+        self._lock = threading.Lock()
+        self._lastUsage = time.time()
 
     def __del__(self):
         if self._connection:
             self.close()
 
     def connect(self, task=None):
+        if self.ready is False:
+            return defer.fail(Exception('Connection cleaning'))
+        elif self._connection and self.ready is True:
+            if task:
+                self._running.add(task)
+            return defer.succeed(self)
+        else:
+            return self._deflock.run(self._connect, task)
+
+    def _connect(self, task=None):
         if task:
             self._running.add(task)
-        if self._connection:
-            return self
+        if self._connection and self.ready is True:
+            return defer.succeed(self)
         args, kwargs = parseConnectionString(self.cs)
         if 'cp_min' not in kwargs:
             kwargs['cp_min'] = 1
@@ -111,13 +126,20 @@ class adbapiClient(object):
         self._connection = adbapi.ConnectionPool(*args, **kwargs)
         semaphore = getSemaphore(self._connection, connmax)
         self._dbapi = self._connection.dbapi
-        return self
+        def _connected(result):
+            self.ready = True
+            return self
+        d = self._connection.runQuery(self._connection.good_sql)
+        d.addCallback(_connected)
+        return d
 
     def close(self, task=None):
+        self._lock.acquire()
         if task is None:
             self._running.clear()
         else:
             self._running.discard(task)
+        self._lock.release()
         if self._connection and not self._running:
             connection, self._connection = self._connection, None
             connection.close()
@@ -196,6 +218,7 @@ class adbapiClient(object):
         @param task: task to run
         @type task: DataSourceConfig
         """
+        self._lastUsage = time.time()
         if not self._connection:
             raise Exception('Connection lost')
         semaphore = getSemaphore(self._connection)
@@ -222,6 +245,7 @@ class dbapiClient(adbapiClient):
         @param task: task to run
         @type task: DataSourceConfig
         """
+        self._lastUsage = time.time()
         try:
             cursor = self._connection.cursor()
             try:

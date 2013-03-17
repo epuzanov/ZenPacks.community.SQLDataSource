@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.3.0'
+__version__ = '2.3.1'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
@@ -519,6 +519,7 @@ class wsmanCursor(object):
         if self._enumCtx:
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
                 self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
+        self._enumCtx = None
         del self._rows[:]
         self._parser = None
         self._selectors.clear()
@@ -541,6 +542,7 @@ class wsmanCursor(object):
         self.description = None
         self.rownumber = -1
         self._selectors.clear()
+        good_sql = False
         if self._enumCtx:
             try: self._connection._wsman_request(XML_REQ%(ENUM_ACTION_RELEASE,
                 self._url, self._uri, uuid.uuid4(), RELEASE_TMPL%self._enumCtx))
@@ -556,6 +558,9 @@ class wsmanCursor(object):
         if args != ():
             operation = operation%args[0]
         operation = operation.encode('unicode-escape')
+        if operation.upper() == 'SELECT 1':
+            operation = 'SELECT * FROM __Namespace'
+            good_sql = True
 
         try:
             props, classname, where = WQLPAT.match(operation).groups('')
@@ -598,6 +603,11 @@ class wsmanCursor(object):
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
                 self._url, self._uri, uuid.uuid4(),
                 ENUM_TMPL%(self._fltr and self._fltr%operation or '')),self._get_parser())
+            if good_sql:
+                self._rows.append((1L,))
+                self.description = (('1',CIM_UINT64,None,None,None,None,None),)
+                self.rownumber = 0
+                return
             if not self._enumCtx: return
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
                 self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),self._get_parser())
@@ -726,6 +736,7 @@ class wsmanCnx:
         self._fltr={'WQL':WQL_FILTER_TMPL,
                     'CQL':CQL_FILTER_TMPL,
                     }.get(kwargs.get('dialect', '').upper(), '')
+        self._lock = threading.Lock()
         xml_resp = self._wsman_request(IDENT_REQ)
         if 'ProductVendor' not in xml_resp:
             raise InterfaceError("Access denied for user '%s' to '%s'"%(
@@ -735,7 +746,6 @@ class wsmanCnx:
             self._wsm_vendor = 'Microsoft'
         elif 'Openwsman' in xml_resp: self._wsm_vendor = 'Openwsman'
         else: self._wsm_vendor = ''
-        self._lock = threading.Lock()
 
 
     def _wsman_request(self, data, parser=None):

@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '2.3.0'
+__version__ = '2.3.1'
 
 import socket
 from xml.sax import xmlreader, handler, make_parser, SAXParseException
@@ -461,6 +461,7 @@ class wbemCursor(object):
         self.rownumber = -1
         del self._rows[:]
         self._keybindings.clear()
+        good_sql = False
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -472,6 +473,9 @@ class wbemCursor(object):
         if args != ():
             operation = operation%args[0]
         operation = operation.encode('unicode-escape')
+        if operation.upper() == 'SELECT 1':
+            operation = 'SELECT * FROM __Namespace'
+            good_sql = True
 
         try:
             props, classname, where = WQLPAT.match(operation).groups('')
@@ -506,6 +510,11 @@ class wbemCursor(object):
                     ''.join((CLNAME_IPARAM%classname,QUALS_IPARAM%'FALSE',
                     pLst and PL_IPARAM%'</VALUE>\n<VALUE>'.join(pLst) or '')))
             xml_resp = self._connection._wbem_request(xml_req)
+            if xml_resp and good_sql:
+                self._rows.append((1L,))
+                self.description = (('1',CIM_UINT64,None,None,None,None,None),)
+                self.rownumber = 0
+                return
             xml_handler = CIMHandler(self)
             parser = make_parser()
             parser.setContentHandler(xml_handler)
@@ -651,7 +660,6 @@ class pywbemCnx:
 
                 response = self._connection.getresponse()
                 xml_resp = response.read()
-
                 if response.status != 200:
                     if response.getheader('CIMError', None) is not None and \
                         response.getheader('PGErrorDetail', None) is not None:

@@ -20,7 +20,7 @@
 #***************************************************************************
 
 __author__ = "Egor Puzanov"
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 from datetime import datetime, timedelta
 import threading
@@ -305,6 +305,7 @@ class wmiCursor(object):
         del self._rows[:]
         self.rownumber = -1
         self.description = None
+        good_sql = False
 
         # for this method default value for params cannot be None,
         # because None is a valid value for format string.
@@ -316,9 +317,16 @@ class wmiCursor(object):
         if args != ():
             operation = operation%args[0]
         operation = operation.encode('unicode-escape')
+        if operation.upper() == 'SELECT 1':
+            operation = 'SELECT * FROM __Namespace'
+            good_sql = True
 
         try:
             self.description,self._rows = self._connection._execQuery(operation)
+            if good_sql:
+                del self._rows[:]
+                self._rows.append((1L,))
+                self.description = (('1',CIM_UINT64,None,None,None,None,None),)
             if self.description:
                 self.rownumber = 0
 

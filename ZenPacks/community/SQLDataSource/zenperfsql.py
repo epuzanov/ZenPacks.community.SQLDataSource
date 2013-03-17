@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.14 2013/02/27 22:50:12 egor Exp $"""
+$Id: zenperfsql.py,v 3.15 2013/03/17 21:07:21 egor Exp $"""
 
-__version__ = "$Revision: 3.14 $"[11:-2]
+__version__ = "$Revision: 3.15 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -60,6 +60,8 @@ unused(DeviceProxy)
 
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
+
+CONN_LOCK = defer.DeferredLock()
 
 #
 # RPN reverse calculation
@@ -258,8 +260,14 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                self.name, self.configId, len(self._datasources))
 
     def cleanup(self):
-        self._close()
         self._cleanUpPool()
+        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
+        # tasks cleanup.
+        # Workaround start
+        if ZVERSION < '3.0.0':
+            self._pool = None
+            self.state = TaskStates.STATE_IDLE
+        # Workaround end
 
     def _getPoolKey(self):
         """
@@ -272,20 +280,15 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         Close the connection currently associated with this task.
         """
+        if self._pool is None: return
         poolKey = self._getPoolKey()
         connection = self._pool.get(poolKey)
         if connection is not None:
-            if not connection._running:
-                connection.close()
+            connection.ready = False
+            connection.close(self.name)
             if connection._connection is None:
+                log.info('cleanup delete pool: %s', poolKey)
                 del self._pool[poolKey]
-        # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
-        # tasks cleanup.
-        # Workaround start
-        if ZVERSION < '3.0.0':
-            self._pool = None
-            self.state = TaskStates.STATE_IDLE
-        # Workaround end
 
     def doTask(self):
         """
@@ -298,9 +301,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
         # tasks cleanup.
         if self._pool is None:
-            return defer.fail("Task cleaned")
+            return
         # See if we need to connect first before doing any collection
-        d = defer.maybeDeferred(self._connect)
+        d = self._connect()
         d.addCallback(self._fetchPerf)
         d.addErrback(self._failure)
 
@@ -320,21 +323,26 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         log.debug("Creating ConnectionPool: %s%s", poolKey,
                     self._preferences.options.showconnectionstring and \
                     ", connection string: %s"%self._connectionString or "")
-        connection = self._pool.setdefault(poolKey,
-                        adbapiClient(self._connectionString)).connect(self.name)
-        if not connection._connection:
-            del self._pool[poolKey]
-            raise Exception('Connection lost')
-        return connection
+        d = CONN_LOCK.run(self._pool.setdefault, poolKey,
+                            adbapiClient(self._connectionString))
+        d.addCallback(lambda connection: connection.connect(self.name))
+        return d
 
     def _close(self):
         """
         do nothing.
         """
+        if self._pool is None: return
         poolKey = self._getPoolKey()
         connection = self._pool.get(poolKey)
         if connection is not None:
-            connection._running.discard(self.name)
+            if connection.ready:
+                connection._running.discard(self.name)
+            else:
+                connection.close(self.name)
+                if connection._connection is None:
+                    log.info('delete pool: %s', poolKey)
+                    del self._pool[poolKey]
 
     def _failure(self, reason):
         """
@@ -346,12 +354,14 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         msg = reason.getErrorMessage()
         if not msg: # Sometimes we get blank error messages
             msg = reason.__class__
-        msg = '%s %s' % (self._devId, msg)
+        msg = '%s %s' % (self._devId, msg.strip())
 
         if self._lastErrorMsg != msg:
             self._lastErrorMsg = msg
             if msg:
                 log.error(msg)
+        else:
+            self._cleanUpPool()
 
         if reason:
             self._eventService.sendEvent(STATUS_EVENT,
