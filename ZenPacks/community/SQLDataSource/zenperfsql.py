@@ -12,9 +12,9 @@ __doc__="""zenperfsql
 
 Run SQL Queries periodically and stores it results in RRD files.
 
-$Id: zenperfsql.py,v 3.15 2013/03/17 21:07:21 egor Exp $"""
+$Id: zenperfsql.py,v 3.16 2013/03/22 18:47:29 egor Exp $"""
 
-__version__ = "$Revision: 3.15 $"[11:-2]
+__version__ = "$Revision: 3.16 $"[11:-2]
 
 import time
 from datetime import datetime, timedelta
@@ -46,7 +46,7 @@ from Products.ZenCollector.tasks import SimpleTaskFactory,\
 from ZenPacks.community.SQLDataSource.SQLClient import  adbapiClient, \
                                                         DataSourceConfig, \
                                                         DataPointConfig, \
-                                                        getPool
+                                                        getConnection
 from Products.ZenEvents import Event
 
 from Products.DataCollector import Plugins
@@ -60,8 +60,6 @@ unused(DeviceProxy)
 
 COLLECTOR_NAME = "zenperfsql"
 POOL_NAME = 'SqlConfigs'
-
-CONN_LOCK = defer.DeferredLock()
 
 #
 # RPN reverse calculation
@@ -252,7 +250,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         self._datasources = taskConfig.datasources
 
         self._connectionString = str(taskConfig.datasources[0].connectionString)
-        self._pool = getPool('adbapi connections')
         self.executed = 0
 
     def __str__(self):
@@ -260,35 +257,23 @@ class SqlPerformanceCollectionTask(ObservableMixin):
                self.name, self.configId, len(self._datasources))
 
     def cleanup(self):
-        self._cleanUpPool()
         # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
         # tasks cleanup.
         # Workaround start
         if ZVERSION < '3.0.0':
-            self._pool = None
+            self._lastErrorMsg = 'Task cleaned'
             self.state = TaskStates.STATE_IDLE
         # Workaround end
-
-    def _getPoolKey(self):
-        """
-        Get the key under which the client should be stored in the pool.
-        """
-        poolKey = self._connectionString
-        return hash(poolKey)
+        return self._cleanUpPool()
 
     def _cleanUpPool(self):
         """
         Close the connection currently associated with this task.
         """
-        if self._pool is None: return
-        poolKey = self._getPoolKey()
-        connection = self._pool.get(poolKey)
-        if connection is not None:
-            connection.ready = False
-            connection.close(self.name)
-            if connection._connection is None:
-                log.info('cleanup delete pool: %s', poolKey)
-                del self._pool[poolKey]
+        d = getConnection(self._connectionString)
+        d.addCallback(lambda conn: conn._autoclose.reset(3))
+        d.addErrback(lambda conn: None)
+        return d
 
     def doTask(self):
         """
@@ -300,10 +285,10 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         # Zenoss 2 ZenCollector scheduler doesn't delete task.LoopingCall after
         # tasks cleanup.
-        if self._pool is None:
+        if self._lastErrorMsg == 'Task cleaned':
             return
         # See if we need to connect first before doing any collection
-        d = self._connect()
+        d = getConnection(self._connectionString)
         d.addCallback(self._fetchPerf)
         d.addErrback(self._failure)
 
@@ -313,36 +298,11 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         # Wait until the Deferred actually completes
         return d
 
-    def _connect(self):
-        """
-        check if ADB-API ConnectionPool for specific connection string in
-        pool dictionary, if not create a new ConnectionPool.
-        """
-        poolKey = self._getPoolKey()
-        self.state = SqlPerformanceCollectionTask.STATE_CONNECTING
-        log.debug("Creating ConnectionPool: %s%s", poolKey,
-                    self._preferences.options.showconnectionstring and \
-                    ", connection string: %s"%self._connectionString or "")
-        d = CONN_LOCK.run(self._pool.setdefault, poolKey,
-                            adbapiClient(self._connectionString))
-        d.addCallback(lambda connection: connection.connect(self.name))
-        return d
-
     def _close(self):
         """
         do nothing.
         """
-        if self._pool is None: return
-        poolKey = self._getPoolKey()
-        connection = self._pool.get(poolKey)
-        if connection is not None:
-            if connection.ready:
-                connection._running.discard(self.name)
-            else:
-                connection.close(self.name)
-                if connection._connection is None:
-                    log.info('delete pool: %s', poolKey)
-                    del self._pool[poolKey]
+        return
 
     def _failure(self, reason):
         """
@@ -360,8 +320,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             self._lastErrorMsg = msg
             if msg:
                 log.error(msg)
-        else:
-            self._cleanUpPool()
 
         if reason:
             self._eventService.sendEvent(STATUS_EVENT,
@@ -379,10 +337,9 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         """
         self.state = SqlPerformanceCollectionTask.STATE_FETCH_DATA
 
-        log.debug("Task %s: Pool: %s Query: %s", self.name, self._getPoolKey(),
-                                                    self._datasources[0].sqlp)
+        log.debug("Task %s: Query: %s", self.name, self._datasources[0].sqlp)
         d = connection.query(self._datasources[0])
-        d.addCallback(self._parseResults)
+        d.addCallback(self._parseResults, connection)
         d.addCallback(self._storeResults)
         d.addCallback(self._updateStatus)
         return d
@@ -447,7 +404,7 @@ class SqlPerformanceCollectionTask(ObservableMixin):
             result.values.append((dp, value))
         return datasource, result
 
-    def _parseResults(self, results):
+    def _parseResults(self, results, connection):
         """
         Interpret the results retrieved from the commands and pass on
         the datapoint values and events.
@@ -455,6 +412,11 @@ class SqlPerformanceCollectionTask(ObservableMixin):
         @parameter results: results rows
         @type results: list
         """
+        if connection._autoclose.active():
+            connection._autoclose.reset(self.interval * 2)
+        else:
+            return defer.fail("Connection lost")
+
         self.state = SqlPerformanceCollectionTask.STATE_PARSE_DATA
         parseableResults = []
 
@@ -535,17 +497,6 @@ class SqlPerformanceCollectionTask(ObservableMixin):
 
         # Return the result so the framework can track success/failure
         return result
-
-    def displayStatistics(self):
-        """
-        Called by the collector framework scheduler, and allows us to
-        see how each task is doing.
-        """
-        display = "Active SQL Pools: %s\n"%len(self._pool)
-        for n, p in self._pool.iteritems():
-            display += 'pool: %s\n'%n
-            display += '\ttasks running: %s\n'%'\n\t\t'.join(p._running)
-        return display
 
 
 if __name__ == '__main__':

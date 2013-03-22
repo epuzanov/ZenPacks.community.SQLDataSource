@@ -1,6 +1,6 @@
 #***************************************************************************
 # pywsmandb - A DB API v2.0 compatible interface to WS-Management.
-# Copyright (C) 2011 Egor Puzanov.
+# Copyright (C) 2011-2013 Egor Puzanov.
 #
 #***************************************************************************
 # This library is free software; you can redistribute it and/or
@@ -41,6 +41,7 @@ WQLPAT = re.compile("^\s*SELECT\s+(?P<props>.+)\s+FROM\s+(?P<cn>\S+)(?:\s+WHERE\
 ANDPAT = re.compile("\s+AND\s+", re.I)
 DTPAT = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})T?(\d{2}):?(\d{2}):?(\d{2})\.?(\d+)?([+|-]\d{2}\d?)?:?(\d{2})?')
 ACTIONPAT = re.compile(r'>(.*)</wsa:Action>')
+VENDORPAT = re.compile("ProductVendor>([^<]*)<")
 
 XML_NS_SOAP_1_2 = "http://www.w3.org/2003/05/soap-envelope"
 XML_NS_ADDRESSING = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -466,7 +467,6 @@ class wsmanCursor(object):
         self.rownumber = -1
         self.arraysize = 1
         self._namespace = connection._namespace
-        self._wsm_vendor = connection._wsm_vendor
         self._url = connection._url
         self._fltr = connection._fltr
         self._uri = ''
@@ -559,8 +559,11 @@ class wsmanCursor(object):
             operation = operation%args[0]
         operation = operation.encode('unicode-escape')
         if operation.upper() == 'SELECT 1':
-            operation = 'SELECT * FROM __Namespace'
-            good_sql = True
+            self._connection._identify()
+            self._rows.append((1L,))
+            self.description = (('1',CIM_UINT64,None,None,None,None,None),)
+            self.rownumber = 0
+            return
 
         try:
             props, classname, where = WQLPAT.match(operation).groups('')
@@ -581,9 +584,11 @@ class wsmanCursor(object):
         if props == '*': self._props = []
         else: self._props=[p for p in set(props.replace(' ','').split(','))]
         try:
-            if self._wsm_vendor == 'Microsoft':
+            if not self._connection._wsm_vendor:
+                self._connection._identify()
+            if 'Microsoft' in self._connection._wsm_vendor:
                 classname = '*'
-            elif self._wsm_vendor == 'Openwsman':
+            elif 'Openwsman' in self._connection._wsm_vendor:
                 try:
                     self._connection._wsman_request(INTR_REQ%(classname,
                         classname, self._url, classname, uuid.uuid4()),
@@ -603,11 +608,6 @@ class wsmanCursor(object):
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_ENUMERATE,
                 self._url, self._uri, uuid.uuid4(),
                 ENUM_TMPL%(self._fltr and self._fltr%operation or '')),self._get_parser())
-            if good_sql:
-                self._rows.append((1L,))
-                self.description = (('1',CIM_UINT64,None,None,None,None,None),)
-                self.rownumber = 0
-                return
             if not self._enumCtx: return
             self._connection._wsman_request(XML_REQ%(ENUM_ACTION_PULL,
                 self._url, self._uri, uuid.uuid4(), PULL_TMPL%self._enumCtx),self._get_parser())
@@ -737,15 +737,18 @@ class wsmanCnx:
                     'CQL':CQL_FILTER_TMPL,
                     }.get(kwargs.get('dialect', '').upper(), '')
         self._lock = threading.Lock()
-        xml_resp = self._wsman_request(IDENT_REQ)
-        if 'ProductVendor' not in xml_resp:
-            raise InterfaceError("Access denied for user '%s' to '%s'"%(
-                                            kwargs.get('user', ''), self._url))
-        elif 'Microsoft' in xml_resp:
+
+
+    def _identify(self):
+        """Identify WS-Management ProductVendor 
+        """
+        try:
+            self._wsm_vendor = VENDORPAT.search(
+                                    self._wsman_request(IDENT_REQ)).group(1)
+        except:
+            raise InterfaceError("Access denied")
+        if 'Microsoft' in self._wsm_vendor:
             self._fltr = WQL_FILTER_TMPL
-            self._wsm_vendor = 'Microsoft'
-        elif 'Openwsman' in xml_resp: self._wsm_vendor = 'Openwsman'
-        else: self._wsm_vendor = ''
 
 
     def _wsman_request(self, data, parser=None):

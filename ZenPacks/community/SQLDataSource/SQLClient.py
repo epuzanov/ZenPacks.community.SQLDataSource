@@ -12,9 +12,9 @@ __doc__="""SQLClient
 
 Gets performance data over python DB-API.
 
-$Id: SQLClient.py,v 3.16 2013/03/17 21:07:47 egor Exp $"""
+$Id: SQLClient.py,v 3.17 2013/03/22 18:48:11 egor Exp $"""
 
-__version__ = "$Revision: 3.16 $"[11:-2]
+__version__ = "$Revision: 3.17 $"[11:-2]
 
 import logging
 log = logging.getLogger("zen.SQLClient")
@@ -30,7 +30,6 @@ from twisted.spread import pb
 import threading
 import sys
 import re
-import time
 
 try:
     from Products.ZenCollector.pools import getPool
@@ -59,6 +58,16 @@ class TimeoutError(Exception):
     def __init__(self, *args):
         Exception.__init__(self)
         self.args = args
+
+CONN_LOCK = defer.DeferredLock()
+
+def delConnection(connectionString):
+    pool = getPool('adbapi connections')
+    if hash(connectionString) in pool:
+        log.debug("delete pool %s", hash(connectionString))
+    d = CONN_LOCK.run(pool.pop, hash(connectionString), None)
+    d.addCallback(lambda conn: conn and conn.close() or None)
+    return d
 
 def parseConnectionString(cs='', options={}):
     try: args, kwargs = eval('(lambda *args,**kwargs:(args,kwargs))(%s)'%cs)
@@ -92,32 +101,24 @@ class adbapiClient(object):
         """
         self.cs = cs
         self._connection = None
-        self._running = set()
         self._dbapi = None
-        self.ready = None
-        self._deflock = defer.DeferredLock()
-        self._lock = threading.Lock()
-        self._lastUsage = time.time()
+        self._autoclose = None
+        self._lock = defer.DeferredLock()
 
     def __del__(self):
         if self._connection:
             self.close()
 
-    def connect(self, task=None):
-        if self.ready is False:
-            return defer.fail(Exception('Connection cleaning'))
-        elif self._connection and self.ready is True:
-            if task:
-                self._running.add(task)
-            return defer.succeed(self)
-        else:
-            return self._deflock.run(self._connect, task)
+    def connect(self):
+        return self._lock.run(self._connect)
 
-    def _connect(self, task=None):
-        if task:
-            self._running.add(task)
-        if self._connection and self.ready is True:
+    def _connect(self):
+        if isinstance(self._connection, Failure):
+            return defer.fail(self._connection)
+        elif self._connection and self._dbapi:
             return defer.succeed(self)
+        if self._autoclose is None:
+            self._autoclose = reactor.callLater(360, delConnection, self.cs)
         args, kwargs = parseConnectionString(self.cs)
         if 'cp_min' not in kwargs:
             kwargs['cp_min'] = 1
@@ -125,25 +126,22 @@ class adbapiClient(object):
         kwargs['cp_max'] = kwargs['cp_min']
         self._connection = adbapi.ConnectionPool(*args, **kwargs)
         semaphore = getSemaphore(self._connection, connmax)
-        self._dbapi = self._connection.dbapi
         def _connected(result):
-            self.ready = True
+            self._dbapi = getattr(self._connection, 'dbapi', None)
             return self
+        def _notConnected(result):
+            self._connection.close()
+            self._connection = result
+            return result
         d = self._connection.runQuery(self._connection.good_sql)
-        d.addCallback(_connected)
+        d.addCallbacks(_connected, _notConnected)
         return d
 
-    def close(self, task=None):
-        self._lock.acquire()
-        if task is None:
-            self._running.clear()
-        else:
-            self._running.discard(task)
-        self._lock.release()
-        if self._connection and not self._running:
+    def close(self):
+        if self._connection:
             connection, self._connection = self._connection, None
-            connection.close()
-            self._dbapi = None
+            if not isinstance(connection, Failure):
+                connection.close()
 
     def _convert(self, val, type):
         if val is None:
@@ -218,9 +216,10 @@ class adbapiClient(object):
         @param task: task to run
         @type task: DataSourceConfig
         """
-        self._lastUsage = time.time()
-        if not self._connection:
-            raise Exception('Connection lost')
+        if isinstance(self._connection, Failure):
+            return defer.fail(self._connection)
+        elif self._connection is None:
+            return defer.fail(Exception('Connection lost'))
         semaphore = getSemaphore(self._connection)
         return semaphore.run(self._connection.runInteraction, self.runQuery,
                                         task.sqlp, task.columns, task.timeout)
@@ -245,11 +244,10 @@ class dbapiClient(adbapiClient):
         @param task: task to run
         @type task: DataSourceConfig
         """
-        self._lastUsage = time.time()
         try:
             cursor = self._connection.cursor()
             try:
-                result = self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
+                result=self.runQuery(cursor,task.sqlp,task.columns,task.timeout)
             except Exception, ex:
                 self._connection.rollback()
                 result = Failure(ex)
@@ -258,6 +256,14 @@ class dbapiClient(adbapiClient):
             except: pass
         return result
 
+def getConnection(connectionString):
+    pool = getPool('adbapi connections')
+    if hash(connectionString) not in pool:
+        log.debug("create pool %s", hash(connectionString))
+    d = CONN_LOCK.run(pool.setdefault, hash(connectionString),
+                            adbapiClient(connectionString))
+    d.addCallback(lambda conn: conn.connect())
+    return d
 
 class DataPointConfig(pb.Copyable, pb.RemoteCopy):
     """
@@ -377,13 +383,11 @@ class SQLClient(BaseClient):
         self.results = []
         self._running = False
         self._taskQueue = []
-        self._pool = getPool('adbapi connections')
 
     def __del__(self):
         del self.results[:]
         del self.plugins[:]
         del self._taskQueue[:]
-        self._pool = None
 
     def query(self, queries):
         """
@@ -414,16 +418,18 @@ class SQLClient(BaseClient):
             return self.clientFinished()
         if not self._running:
             self._running = True
+            def _connected(connection, dsc):
+                if isinstance(connection, Failure):
+                    d = defer.fail(connection)
+                elif connection._autoclose.active():
+                    connection._autoclose.reset(305)
+                    d = connection.query(dsc)
+                else:
+                    d = defer.fail(Exception("Connection close"))
+                d.addBoth(self._finished, dsc)
             dsc = self._taskQueue[0]
-            poolKey = hash(dsc.connectionString)
-            connection = self._pool.get(poolKey)
-            if connection is None:
-                connection = adbapiClient(dsc.connectionString)
-                connection.connect(hash(self))
-                self._pool[poolKey] = connection
-            d = connection.query(dsc)
-            d.addBoth(self._finished, dsc)
-            reactor.callLater(0, self._runTask)
+            c = getConnection(dsc.connectionString)
+            c.addBoth(_connected, dsc)
 
     def _finished(self, results, currentTask):
         cTask = (currentTask.connectionString, currentTask.sqlp,
@@ -526,11 +532,6 @@ class SQLClient(BaseClient):
         Stop the collection of performance data
         """
         log.info("SQL client finished collection for %s" % self.hostname)
-        for poolKey in self._pool.keys():
-            if hash(self) in getattr(self._pool.get(poolKey), '_running', []):
-                self._pool[poolKey].close(hash(self))
-            if not getattr(self._pool.get(poolKey), '_connection',  True):
-                del self._pool[poolKey]
         if self.datacollector:
             self.datacollector.clientFinished(self)
 

@@ -1,6 +1,6 @@
 #***************************************************************************
 # pyisqldb - A DB API v2.0 compatible wrapper to unixODBC isql.
-# Copyright (C) 2011 Egor Puzanov.
+# Copyright (C) 2011-2013 Egor Puzanov.
 #
 #***************************************************************************
 # This library is free software; you can redistribute it and/or

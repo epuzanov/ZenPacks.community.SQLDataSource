@@ -1,6 +1,6 @@
 #***************************************************************************
 # pywmidb - A DB API v2.0 compatible interface to WMI.
-# Copyright (C) 2011, 2012 Egor Puzanov.
+# Copyright (C) 2011-2013 Egor Puzanov.
 #
 #***************************************************************************
 # This library is free software; you can redistribute it and/or
